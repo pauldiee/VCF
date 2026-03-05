@@ -65,6 +65,8 @@
     Version : 2.0
     API     : NSX Policy REST API v1 (compatible with NSX 4.x and 9.x)
     Pair    : Import-NSXSegments.ps1
+    Author  : Paul van Dieen
+    Blog    : https://www.hollebollevsan.nl
 #>
 
 [CmdletBinding()]

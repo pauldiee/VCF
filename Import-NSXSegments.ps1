@@ -106,6 +106,8 @@
     Version : 2.1
     API     : NSX Policy REST API v1 (compatible with NSX 4.x and 9.x)
     Pair    : Export-NSXSegments.ps1
+    Author  : Paul van Dieen
+    Blog    : https://www.hollebollevsan.nl
 #>
 
 [CmdletBinding(SupportsShouldProcess)]
