@@ -1,0 +1,15 @@
+# HostPrep - ESXi Host List
+# -------------------------------------------------------
+# Add one fully-qualified domain name (FQDN) per line.
+# Lines starting with # are ignored (comments).
+# Blank lines are also safely ignored.
+#
+# Example format:
+#   esxi01.yourdomain.local
+#   esxi02.yourdomain.local
+# -------------------------------------------------------
+
+esxi01.vcf.lab
+esxi02.vcf.lab
+esxi03.vcf.lab
+esxi04.vcf.lab
