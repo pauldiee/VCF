@@ -15,6 +15,10 @@
          wait for the host to return online
       5. Optionally reset the root account password (asked interactively)
 
+    After all hosts are processed, an HTML report is generated in the same
+    folder as the script containing the SHA-256 SSL thumbprint for each host,
+    ready to use when commissioning hosts into SDDC Manager.
+
     Host List File (.txt)
     ---------------------
     The script will prompt for the full path to a plain text file containing
@@ -82,7 +86,7 @@
 
 .NOTES
     Script  : HostPrep.ps1
-    Version : 2.8.0
+    Version : 2.9.0
     Author  : Paul van Dieen
     Blog    : https://www.hollebollevsan.nl
     Date    : 2026-03-07
@@ -124,6 +128,11 @@
         2.8.0 - PowerCLI CEIP opt-out persisted to User scope on first run;
                 InvalidCertificateAction set to Ignore for the session;
                 removed unused Windows.Forms assembly; cleaned up description
+        2.9.0 - Test-ESXiCertificateNeedsRegen now returns a structured
+                object including SHA-256 thumbprint, CN and expiry;
+                thumbprint re-read after cert regen to reflect new cert;
+                HTML report generated after run with thumbprints ready for
+                SDDC Manager commissioning; added -ReportPath parameter
 #>
 
 [CmdletBinding()]
@@ -135,6 +144,11 @@ param (
     [string]$LogPath = [System.IO.Path]::Combine(
         [Environment]::GetFolderPath('Desktop'),
         "HostPrep_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+    ),
+
+    [string]$ReportPath = [System.IO.Path]::Combine(
+        $PSScriptRoot,
+        "HostPrep_$(Get-Date -Format 'yyyyMMdd_HHmmss')_Report.html"
     )
 )
 
@@ -142,7 +156,7 @@ param (
 
 $ScriptMeta = @{
     Name    = "HostPrep.ps1"
-    Version = "2.8.0"
+    Version = "2.9.0"
     Author  = "Paul van Dieen"
     Blog    = "https://www.hollebollevsan.nl"
     Date    = "2026-03-07"
@@ -287,7 +301,8 @@ function Test-VCF9PasswordCompliance {
 function Test-ESXiCertificateNeedsRegen {
     <#
     .SYNOPSIS
-        Checks whether the ESXi host certificate CN matches the host's FQDN.
+        Checks whether the ESXi host certificate CN matches the host's FQDN
+        and captures the SHA-256 thumbprint for use in the HTML report.
 
     .DESCRIPTION
         Connects to port 443 and reads the TLS certificate. If the CN in the
@@ -298,8 +313,11 @@ function Test-ESXiCertificateNeedsRegen {
         FQDN or hostname of the ESXi host.
 
     .OUTPUTS
-        $true  — CN does not match hostname, regeneration needed
-        $false — CN matches hostname, regeneration not needed
+        PSCustomObject with:
+          .NeedsRegen  [bool]   - $true if CN does not match hostname
+          .Thumbprint  [string] - SHA-256 thumbprint formatted with colons
+          .CN          [string] - CN extracted from the certificate Subject
+          .Expiry      [string] - Certificate expiry date
     #>
     param (
         [Parameter(Mandatory)][string]$VMHost
@@ -322,22 +340,41 @@ function Test-ESXiCertificateNeedsRegen {
         $cnMatch = $cert.Subject -match 'CN=([^,]+)'
         $cn      = if ($cnMatch) { $Matches[1].Trim() } else { "" }
 
-        Write-Host "  Certificate CN : $cn" -ForegroundColor DarkGray
-        Write-Host "  Host FQDN      : $VMHost" -ForegroundColor DarkGray
-        Write-Host "  Expires        : $($cert.NotAfter)" -ForegroundColor DarkGray
+        # Compute SHA-256 thumbprint formatted with colons (as SDDC Manager expects)
+        $sha256      = [System.Security.Cryptography.SHA256]::Create()
+        $hashBytes   = $sha256.ComputeHash($cert.RawData)
+        $thumbprint  = ($hashBytes | ForEach-Object { $_.ToString("X2") }) -join ":"
 
-        if ($cn -eq $VMHost) {
-            Write-Host "  CN matches hostname. Regeneration not needed." -ForegroundColor Green
-            return $false
-        } else {
+        $expiry = $cert.NotAfter.ToString("yyyy-MM-dd HH:mm:ss")
+
+        Write-Host "  Certificate CN  : $cn" -ForegroundColor DarkGray
+        Write-Host "  Host FQDN       : $VMHost" -ForegroundColor DarkGray
+        Write-Host "  Expires         : $expiry" -ForegroundColor DarkGray
+        Write-Host "  SHA-256         : $thumbprint" -ForegroundColor DarkGray
+
+        $needsRegen = $cn -ne $VMHost
+        if ($needsRegen) {
             Write-Host "  CN does not match hostname. Regeneration needed." -ForegroundColor Yellow
-            return $true
+        } else {
+            Write-Host "  CN matches hostname. Regeneration not needed." -ForegroundColor Green
+        }
+
+        return [PSCustomObject]@{
+            NeedsRegen  = $needsRegen
+            Thumbprint  = $thumbprint
+            CN          = $cn
+            Expiry      = $expiry
         }
 
     } catch {
         Write-Warning "  Could not read certificate from $VMHost port 443: $_"
         Write-Warning "  Proceeding with regeneration to be safe."
-        return $true
+        return [PSCustomObject]@{
+            NeedsRegen  = $true
+            Thumbprint  = "N/A"
+            CN          = "N/A"
+            Expiry      = "N/A"
+        }
     }
 }
 
@@ -712,6 +749,7 @@ foreach ($esxiHost in $targetEsxiHosts) {
         CertRegen         = "Skipped"
         Rebooted          = "Skipped"
         PasswordReset     = "Skipped"
+        Thumbprint        = "N/A"
         Error             = ""
     }
 
@@ -784,9 +822,10 @@ foreach ($esxiHost in $targetEsxiHosts) {
                 $hostResult.CertRegen = "Manual"
                 $hostResult.Rebooted  = "Manual"
             } else {
-                $certNeedsRegen = Test-ESXiCertificateNeedsRegen -VMHost $esxiHost
+                $certCheck = Test-ESXiCertificateNeedsRegen -VMHost $esxiHost
+                $hostResult.Thumbprint = $certCheck.Thumbprint
 
-                if (-not $certNeedsRegen) {
+                if (-not $certCheck.NeedsRegen) {
                     $hostResult.CertRegen = "Skipped"
                     $hostResult.Rebooted  = "Skipped"
                 } else {
@@ -818,6 +857,11 @@ foreach ($esxiHost in $targetEsxiHosts) {
                         Connect-VIServer -Server $esxiHost -Credential $esxiCredentials -ErrorAction Stop | Out-Null
                         $vmHostObj = Get-VMHost -Name $esxiHost -ErrorAction Stop
                         Write-Host "  Reconnected to $esxiHost." -ForegroundColor Green
+
+                        # Re-read thumbprint from the newly regenerated certificate
+                        Write-Host "  Reading new certificate thumbprint..." -ForegroundColor Cyan
+                        $newCertCheck = Test-ESXiCertificateNeedsRegen -VMHost $esxiHost
+                        $hostResult.Thumbprint = $newCertCheck.Thumbprint
                     }
                 }
             }
@@ -939,7 +983,146 @@ function Write-ColorSummaryTable {
     Write-Host $divider -ForegroundColor DarkCyan
 }
 
-$summaryWidth = 62
+function Write-HtmlReport {
+    param (
+        [System.Collections.Generic.List[PSCustomObject]]$Data,
+        [string]$ReportPath
+    )
+
+    $generatedAt = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+
+    # Build table rows
+    $rows = foreach ($row in $Data) {
+        $overallOk = (-not $row.Error) -and
+                     ($row.Connected -eq $true) -and
+                     ($row.NTP -eq "OK") -and
+                     ($row.AdvancedSettings -eq "OK")
+
+        $rowClass = if ($row.Error) { "fail" } elseif ($overallOk) { "ok" } else { "warn" }
+
+        $thumbCell = if ($row.Thumbprint -eq "N/A") {
+            "<td class='na'>N/A</td>"
+        } else {
+            "<td class='thumbprint'>$([System.Web.HttpUtility]::HtmlEncode($row.Thumbprint))</td>"
+        }
+
+        $statusIcon = if ($row.Error) { "&#10008;" } elseif ($overallOk) { "&#10004;" } else { "&#9888;" }
+
+        "
+        <tr class='$rowClass'>
+            <td>$([System.Web.HttpUtility]::HtmlEncode($row.Host))</td>
+            $thumbCell
+            <td>$(if ($row.CertRegen -eq 'OK') { 'Regenerated' } elseif ($row.CertRegen -eq 'Skipped') { 'Not needed' } elseif ($row.CertRegen -eq 'Manual') { 'Manual required' } else { [System.Web.HttpUtility]::HtmlEncode($row.CertRegen) })</td>
+            <td>$(if ($row.Rebooted -eq 'OK') { 'Yes' } elseif ($row.Rebooted -eq 'Skipped') { 'Not needed' } elseif ($row.Rebooted -eq 'Manual') { 'Manual required' } else { [System.Web.HttpUtility]::HtmlEncode($row.Rebooted) })</td>
+            <td>$(if ($row.NTP -eq 'OK') { 'OK' } else { [System.Web.HttpUtility]::HtmlEncode($row.NTP) })</td>
+            <td>$(if ($row.AdvancedSettings -eq 'OK') { 'OK' } else { [System.Web.HttpUtility]::HtmlEncode($row.AdvancedSettings) })</td>
+            <td>$(if ($row.PasswordReset -eq 'OK') { 'Reset' } elseif ($row.PasswordReset -eq 'Skipped') { 'Not requested' } else { [System.Web.HttpUtility]::HtmlEncode($row.PasswordReset) })</td>
+            <td class='status'>$statusIcon $(if ($row.Error) { [System.Web.HttpUtility]::HtmlEncode($row.Error) } else { '' })</td>
+        </tr>"
+    }
+
+    $html = @"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HostPrep Report</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #0d1117; color: #c9d1d9; padding: 32px; }
+  header { margin-bottom: 28px; border-bottom: 2px solid #1f6feb; padding-bottom: 16px; }
+  header h1 { font-size: 1.6rem; color: #58a6ff; letter-spacing: 0.5px; }
+  header p  { font-size: 0.85rem; color: #8b949e; margin-top: 4px; }
+  .meta { display: flex; gap: 32px; margin-bottom: 24px; }
+  .meta-item { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px 20px; }
+  .meta-item .label { font-size: 0.75rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
+  .meta-item .value { font-size: 1.1rem; font-weight: 600; color: #c9d1d9; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; background: #161b22; border-radius: 8px; overflow: hidden; border: 1px solid #30363d; }
+  thead th { background: #1f2937; color: #58a6ff; padding: 10px 14px; text-align: left; font-weight: 600; letter-spacing: 0.4px; white-space: nowrap; border-bottom: 2px solid #1f6feb; }
+  tbody tr { border-bottom: 1px solid #21262d; transition: background 0.15s; }
+  tbody tr:hover { background: #1c2128; }
+  tbody tr:last-child { border-bottom: none; }
+  td { padding: 10px 14px; vertical-align: top; }
+  td.thumbprint { font-family: 'Consolas', 'Courier New', monospace; font-size: 0.72rem; color: #79c0ff; word-break: break-all; max-width: 420px; }
+  td.na { color: #6e7681; font-style: italic; }
+  td.status { white-space: nowrap; }
+  tr.ok  td.status { color: #3fb950; }
+  tr.fail td.status { color: #f85149; }
+  tr.warn td.status { color: #d29922; }
+  tr.ok  td:first-child { border-left: 3px solid #3fb950; }
+  tr.fail td:first-child { border-left: 3px solid #f85149; }
+  tr.warn td:first-child { border-left: 3px solid #d29922; }
+  .note { margin-top: 20px; font-size: 0.8rem; color: #8b949e; background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px 16px; }
+  .note strong { color: #c9d1d9; }
+  footer { margin-top: 28px; font-size: 0.75rem; color: #6e7681; text-align: center; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>&#128196; HostPrep &mdash; VCF Commissioning Report</h1>
+  <p>Generated by HostPrep.ps1 v$($ScriptMeta.Version) &bull; $generatedAt</p>
+</header>
+
+<div class="meta">
+  <div class="meta-item">
+    <div class="label">Hosts processed</div>
+    <div class="value">$($Data.Count)</div>
+  </div>
+  <div class="meta-item">
+    <div class="label">Successful</div>
+    <div class="value" style="color:#3fb950">$(($Data | Where-Object { -not $_.Error -and $_.Connected }).Count)</div>
+  </div>
+  <div class="meta-item">
+    <div class="label">Failed</div>
+    <div class="value" style="color:#f85149">$(($Data | Where-Object { $_.Error }).Count)</div>
+  </div>
+  <div class="meta-item">
+    <div class="label">Thumbprint algorithm</div>
+    <div class="value">SHA-256</div>
+  </div>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th>Host FQDN</th>
+      <th>SSL Thumbprint (SHA-256)</th>
+      <th>Cert Regen</th>
+      <th>Rebooted</th>
+      <th>NTP</th>
+      <th>Advanced Settings</th>
+      <th>Password Reset</th>
+      <th>Status</th>
+    </tr>
+  </thead>
+  <tbody>
+    $($rows -join "`n")
+  </tbody>
+</table>
+
+<div class="note">
+  <strong>Note:</strong> The SSL thumbprint shown is the SHA-256 fingerprint of the certificate
+  present on each host at the time this script ran. Use these values to verify host identity
+  when adding hosts to SDDC Manager during VCF commissioning.
+  Thumbprints for hosts where certificate regeneration was performed reflect the <em>new</em> certificate.
+</div>
+
+<footer>HostPrep.ps1 &bull; $($ScriptMeta.Author) &bull; $($ScriptMeta.Blog)</footer>
+
+</body>
+</html>
+"@
+
+    # HttpUtility requires System.Web — load it
+    Add-Type -AssemblyName System.Web
+
+    $html | Out-File -FilePath $ReportPath -Encoding UTF8
+    Write-Host ("  HTML report written to: {0}" -f $ReportPath) -ForegroundColor Cyan
+}
+
+
 Write-Host ""
 Write-Host ("=" * $summaryWidth) -ForegroundColor DarkCyan
 Write-Host ("  SUMMARY  -  {0} host(s) processed" -f $results.Count) -ForegroundColor Cyan
@@ -956,7 +1139,10 @@ Write-Host "Skipped  " -NoNewline -ForegroundColor DarkGray
 Write-Host "Manual  "  -NoNewline -ForegroundColor Yellow
 Write-Host "Warning"               -ForegroundColor Yellow
 Write-Host ""
-Write-Host ("  Log written to: {0}" -f $LogPath) -ForegroundColor DarkGray
+Write-Host ("  Log written to    : {0}" -f $LogPath) -ForegroundColor DarkGray
+
+Write-HtmlReport -Data $results -ReportPath $ReportPath
+
 Write-Host ("=" * $summaryWidth) -ForegroundColor DarkCyan
 Write-Host ""
 
