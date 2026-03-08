@@ -86,7 +86,7 @@
 
 .NOTES
     Script  : HostPrep.ps1
-    Version : 2.9.0
+    Version : 2.9.1
     Author  : Paul van Dieen
     Blog    : https://www.hollebollevsan.nl
     Date    : 2026-03-07
@@ -133,6 +133,9 @@
                 thumbprint re-read after cert regen to reflect new cert;
                 HTML report generated after run with thumbprints ready for
                 SDDC Manager commissioning; added -ReportPath parameter
+        2.9.1 - Fixed HTML report Successful count (Measure-Object + [int]
+                cast prevents single-result .Count returning empty);
+                moved Add-Type System.Web to Initialisation region
 #>
 
 [CmdletBinding()]
@@ -156,10 +159,10 @@ param (
 
 $ScriptMeta = @{
     Name    = "HostPrep.ps1"
-    Version = "2.9.0"
+    Version = "2.9.1"
     Author  = "Paul van Dieen"
     Blog    = "https://www.hollebollevsan.nl"
-    Date    = "2026-03-07"
+    Date    = "2026-03-08"
 }
 
 #endregion
@@ -206,6 +209,9 @@ if (-not (Get-Module -ListAvailable -Name "Posh-SSH")) {
     Import-Module Posh-SSH -ErrorAction Stop
     $script:PoshSSHAvailable = $true
 }
+
+# Required for HTML entity encoding in the commissioning report
+Add-Type -AssemblyName System.Web
 
 #endregion
 #region --- Helper Functions ---
@@ -989,6 +995,10 @@ function Write-HtmlReport {
         [string]$ReportPath
     )
 
+    $totalCount   = [int]$Data.Count
+    $successCount = [int]($Data | Where-Object { (-not $_.Error) -and ($_.Connected -eq $true) } | Measure-Object).Count
+    $failCount    = [int]($Data | Where-Object { $_.Error -or ($_.Connected -ne $true) } | Measure-Object).Count
+
     $generatedAt = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
     # Build table rows
@@ -1068,15 +1078,15 @@ function Write-HtmlReport {
 <div class="meta">
   <div class="meta-item">
     <div class="label">Hosts processed</div>
-    <div class="value">$($Data.Count)</div>
+    <div class="value">$totalCount</div>
   </div>
   <div class="meta-item">
     <div class="label">Successful</div>
-    <div class="value" style="color:#3fb950">$(($Data | Where-Object { -not $_.Error -and $_.Connected }).Count)</div>
+    <div class="value" style="color:#3fb950">$successCount</div>
   </div>
   <div class="meta-item">
     <div class="label">Failed</div>
-    <div class="value" style="color:#f85149">$(($Data | Where-Object { $_.Error }).Count)</div>
+    <div class="value" style="color:#f85149">$failCount</div>
   </div>
   <div class="meta-item">
     <div class="label">Thumbprint algorithm</div>
@@ -1114,9 +1124,6 @@ function Write-HtmlReport {
 </body>
 </html>
 "@
-
-    # HttpUtility requires System.Web — load it
-    Add-Type -AssemblyName System.Web
 
     $html | Out-File -FilePath $ReportPath -Encoding UTF8
     Write-Host ("  HTML report written to: {0}" -f $ReportPath) -ForegroundColor Cyan
