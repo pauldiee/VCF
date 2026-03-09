@@ -114,7 +114,7 @@
 
 .NOTES
     Script  : HostPrep.ps1
-    Version : 3.1.0
+    Version : 3.1.2
     Author  : Paul van Dieen
     Blog    : https://www.hollebollevsan.nl
     Date    : 2026-03-07
@@ -170,7 +170,13 @@
                 SSD TRIM settings (HardwareAcceleratedMove/Init);
                 added OptionalSettings column to summary table;
                 expanded description with optional settings documentation
-        3.1.0 - Wait-ESXiHostOnline return value now checked explicitly;
+        3.1.2 - Fixed HTML report table rendering as literal text; here-string
+                $rows interpolation was over-escaped as `$(`$rows...) causing
+                PowerShell to output it verbatim instead of expanding it 'return'
+                inside foreach exited the script scope before reaching
+                the summary/report block; replaced with an else branch
+                so WhatIfReport falls through to finally for disconnect
+                and the loop continues normally to produce the report
                 optional settings loop uses per-setting try/catch with
                 individual error reporting and Partial state when only
                 some settings fail; type notes and re-run warning added
@@ -205,7 +211,7 @@ param (
 
 $ScriptMeta = @{
     Name    = "HostPrep.ps1"
-    Version = "3.1.0"
+    Version = "3.1.2"
     Author  = "Paul van Dieen"
     Blog    = "https://www.hollebollevsan.nl"
     Date    = "2026-03-09"
@@ -888,9 +894,8 @@ foreach ($esxiHost in $targetEsxiHosts) {
             Write-Host "  Thumbprint : $($certCheck.Thumbprint)" -ForegroundColor DarkGray
             Write-Host "  CN         : $($certCheck.CN)"         -ForegroundColor DarkGray
             Write-Host "  Expiry     : $($certCheck.Expiry)"     -ForegroundColor DarkGray
-            # Skip all remaining steps - jump to finally for disconnect
-            return
-        }
+            # Skip all remaining steps — fall through to finally for clean disconnect
+        } else {
 
         # --- NTP ---
         Write-Host "`n  [NTP]" -ForegroundColor Cyan
@@ -1052,6 +1057,8 @@ foreach ($esxiHost in $targetEsxiHosts) {
                 Write-Warning "  Password reset failed: $_"
             }
         }
+
+        } # end else (not WhatIfReport)
 
     } catch {
         $hostResult.Error = $_.Exception.Message
@@ -1292,7 +1299,7 @@ function Write-HtmlReport {
     </tr>
   </thead>
   <tbody>
-    `$(`$rows -join "`n")
+    $($rows -join "`n")
   </tbody>
 </table>
 
