@@ -114,10 +114,10 @@
 
 .NOTES
     Script  : HostPrep.ps1
-    Version : 3.1.2
+    Version : 3.2.0
     Author  : Paul van Dieen
     Blog    : https://www.hollebollevsan.nl
-    Date    : 2026-03-07
+    Date    : 2026-03-09
 
     Changelog:
         1.0.0 - Initial release
@@ -170,22 +170,19 @@
                 SSD TRIM settings (HardwareAcceleratedMove/Init);
                 added OptionalSettings column to summary table;
                 expanded description with optional settings documentation
-        3.1.2 - Fixed HTML report table rendering as literal text; here-string
-                $rows interpolation was over-escaped as `$(`$rows...) causing
-                PowerShell to output it verbatim instead of expanding it 'return'
-                inside foreach exited the script scope before reaching
-                the summary/report block; replaced with an else branch
-                so WhatIfReport falls through to finally for disconnect
-                and the loop continues normally to produce the report
-                optional settings loop uses per-setting try/catch with
-                individual error reporting and Partial state when only
-                some settings fail; type notes and re-run warning added
-                to $OptionalAdvancedSettings comments; added -WhatIfReport
-                switch for thumbprint-only collection pass without changes;
-                HTML report gains clipboard copy button per thumbprint,
-                cert expiry column with amber/red highlighting at 90/30
-                days, and Optional Settings column; Expiry captured from
-                cert check and stored in $hostResult
+        3.1.0 - Per-setting try/catch in optional settings loop with Partial
+                state; Wait-ESXiHostOnline return value checked; type notes
+                and re-run warning in $OptionalAdvancedSettings comments;
+                added -WhatIfReport switch; HTML report gains clipboard copy
+                button, cert expiry column with amber/red highlighting, and
+                Optional Settings column; Expiry stored in $hostResult
+        3.2.0 - Fixed $summaryWidth undefined (derived from column widths);
+                WhatIfReport overallOk logic corrected (NTP/AdvancedSettings
+                are Skipped so status now shows correct checkmark); CertRegen
+                'OK' in WhatIfReport now shows 'Not needed' not 'Regenerated';
+                removed dead-code hostOnline check (Wait-ESXiHostOnline already
+                throws on timeout); password reset Y/N prompt skipped during
+                WhatIfReport; Posh-SSH warning suppressed during WhatIfReport
 #>
 
 [CmdletBinding()]
@@ -211,7 +208,7 @@ param (
 
 $ScriptMeta = @{
     Name    = "HostPrep.ps1"
-    Version = "3.1.2"
+    Version = "3.2.0"
     Author  = "Paul van Dieen"
     Blog    = "https://www.hollebollevsan.nl"
     Date    = "2026-03-09"
@@ -308,17 +305,19 @@ if ($WhatIfReport) {
 Start-Transcript -Path $LogPath -Append
 Write-Host "HostPrep started at $(Get-Date)" -ForegroundColor Cyan
 
-# Verify optional modules
+# Verify optional modules (Posh-SSH needed for cert regen — not relevant in WhatIfReport mode)
 $script:PoshSSHAvailable = $false
-if (-not (Get-Module -ListAvailable -Name "Posh-SSH")) {
-    Write-Host ""
-    Write-Host "  WARNING: The 'Posh-SSH' module is not installed." -ForegroundColor Yellow
-    Write-Host "  Certificate regeneration will be skipped for all hosts." -ForegroundColor Yellow
-    Write-Host "  To enable it, run: Install-Module -Name Posh-SSH -Scope CurrentUser" -ForegroundColor Yellow
-    Write-Host ""
-} else {
-    Import-Module Posh-SSH -ErrorAction Stop
-    $script:PoshSSHAvailable = $true
+if (-not $WhatIfReport) {
+    if (-not (Get-Module -ListAvailable -Name "Posh-SSH")) {
+        Write-Host ""
+        Write-Host "  WARNING: The 'Posh-SSH' module is not installed." -ForegroundColor Yellow
+        Write-Host "  Certificate regeneration will be skipped for all hosts." -ForegroundColor Yellow
+        Write-Host "  To enable it, run: Install-Module -Name Posh-SSH -Scope CurrentUser" -ForegroundColor Yellow
+        Write-Host ""
+    } else {
+        Import-Module Posh-SSH -ErrorAction Stop
+        $script:PoshSSHAvailable = $true
+    }
 }
 
 # Required for HTML entity encoding in the commissioning report
@@ -731,7 +730,12 @@ $esxiPassword    = Read-Host "Enter the 'root' password used to connect to the E
 $esxiCredentials = New-Object System.Management.Automation.PSCredential("root", $esxiPassword)
 
 # Ask interactively whether to reset the root account password
+# (not applicable in WhatIfReport mode — no changes are made)
 Write-Host ""
+if ($WhatIfReport) {
+    $ResetPassword = $false
+    Write-Host "  Password reset: SKIPPED (WhatIfReport mode)" -ForegroundColor DarkGray
+} else {
 $resetAnswer = $null
 while ($resetAnswer -notin @('Y','N')) {
     $resetAnswer = (Read-Host "  Do you want to reset the root account password on all hosts? [Y/N]").Trim().ToUpper()
@@ -810,6 +814,7 @@ if ($ResetPassword) {
 } else {
     Write-Host "  Password reset: SKIPPED" -ForegroundColor DarkGray
 }
+} # end else (not WhatIfReport) for password prompt
 Write-Host ""
 
 #endregion
@@ -1012,11 +1017,8 @@ foreach ($esxiHost in $targetEsxiHosts) {
                         Disconnect-VIServer -Server $esxiHost -Confirm:$false -ErrorAction SilentlyContinue
                         Write-Host "  Reboot issued. Waiting for host to come back online..." -ForegroundColor Yellow
 
-                        # Wait for the host to come back
-                        $hostOnline = Wait-ESXiHostOnline -VMHost $esxiHost
-                        if (-not $hostOnline) {
-                            throw "Host $esxiHost did not come back online within the timeout period."
-                        }
+                        # Wait for the host to come back (throws on timeout)
+                        Wait-ESXiHostOnline -VMHost $esxiHost
                         $hostResult.Rebooted = "OK"
 
                         # Reconnect for remaining steps (password reset)
@@ -1078,6 +1080,10 @@ foreach ($esxiHost in $targetEsxiHosts) {
 #endregion
 
 #region --- Summary ---
+
+# Derive summary banner width from column definitions (matches Write-ColorSummaryTable divider)
+$summaryColumnWidths = @(34, 11, 6, 17, 17, 10, 10, 15, 28)
+$summaryWidth = ($summaryColumnWidths | Measure-Object -Sum).Sum + ($summaryColumnWidths.Count * 3) + 1
 
 function Write-ColorSummaryTable {
     param (
@@ -1169,10 +1175,16 @@ function Write-HtmlReport {
 
     # Build table rows
     $rows = foreach ($row in $Data) {
-        $overallOk = (-not $row.Error) -and
-                     ($row.Connected -eq $true) -and
-                     ($row.NTP -eq "OK") -and
-                     ($row.AdvancedSettings -eq "OK")
+        # WhatIfReport: only connected + no error + cert readable counts as success
+        # Normal run: connected + no error + NTP OK + AdvancedSettings OK
+        $overallOk = if ($WhatIfReport) {
+            (-not $row.Error) -and ($row.Connected -eq $true) -and ($row.Thumbprint -ne "N/A")
+        } else {
+            (-not $row.Error) -and
+            ($row.Connected -eq $true) -and
+            ($row.NTP -eq "OK") -and
+            ($row.AdvancedSettings -eq "OK")
+        }
 
         $rowClass = if ($row.Error) { "fail" } elseif ($overallOk) { "ok" } else { "warn" }
 
@@ -1204,7 +1216,14 @@ function Write-HtmlReport {
             <td>$([System.Web.HttpUtility]::HtmlEncode($row.Host))</td>
             $thumbCell
             $expiryCell
-            <td>$(if ($row.CertRegen -eq 'OK') { 'Regenerated' } elseif ($row.CertRegen -eq 'Skipped') { 'Not needed' } elseif ($row.CertRegen -eq 'Manual') { 'Manual required' } elseif ($row.CertRegen -eq 'Regen needed') { '<span class=expiry-warn>Regen needed</span>' } else { [System.Web.HttpUtility]::HtmlEncode($row.CertRegen) })</td>
+            <td>$(
+                if     ($row.CertRegen -eq 'OK' -and $WhatIfReport) { 'Not needed' }
+                elseif ($row.CertRegen -eq 'OK')                    { 'Regenerated' }
+                elseif ($row.CertRegen -eq 'Skipped')               { 'Not needed' }
+                elseif ($row.CertRegen -eq 'Manual')                { 'Manual required' }
+                elseif ($row.CertRegen -eq 'Regen needed')          { '<span class=expiry-warn>Regen needed</span>' }
+                else                                                 { [System.Web.HttpUtility]::HtmlEncode($row.CertRegen) }
+            )</td>
             <td>$(if ($row.Rebooted -eq 'OK') { 'Yes' } elseif ($row.Rebooted -eq 'Skipped') { 'Not needed' } elseif ($row.Rebooted -eq 'Manual') { 'Manual required' } else { [System.Web.HttpUtility]::HtmlEncode($row.Rebooted) })</td>
             <td>$(if ($row.NTP -eq 'OK') { 'OK' } else { [System.Web.HttpUtility]::HtmlEncode($row.NTP) })</td>
             <td>$(if ($row.AdvancedSettings -eq 'OK') { 'OK' } else { [System.Web.HttpUtility]::HtmlEncode($row.AdvancedSettings) })</td>
