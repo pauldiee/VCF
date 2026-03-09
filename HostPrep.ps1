@@ -19,6 +19,24 @@
     folder as the script containing the SHA-256 SSL thumbprint for each host,
     ready to use when commissioning hosts into SDDC Manager.
 
+    Optional Advanced Settings
+    --------------------------
+    A configuration hashtable near the top of the script ($OptionalAdvancedSettings)
+    contains additional advanced settings that are disabled by default. To enable
+    any of them, set Enabled = $true and adjust the Value if needed. Currently
+    available optional settings:
+
+      - Config.HostAgent.plugins.hostsvc.esxAdminsGroup
+          The Active Directory group whose members receive full admin access.
+          Default value: "ESX Admins" — change to match your AD group name.
+
+      - LSOM.lsomEnableRebuildOnLSE
+          Enables vSAN automatic rebuild when a device is flagged as LSE.
+
+      - DataMover.HardwareAcceleratedMove / HardwareAcceleratedInit
+          Enables SSD TRIM support so ESXi issues UNMAP commands to compatible
+          SSDs, allowing drive firmware to reclaim freed blocks.
+
     Host List File (.txt)
     ---------------------
     The script will prompt for the full path to a plain text file containing
@@ -75,6 +93,13 @@
     [DRY RUN] so you can validate the script flow without a real ESXi host.
     Credentials and the host list are still prompted but never used.
 
+.PARAMETER WhatIfReport
+    Connects to each host, reads the current certificate CN and SHA-256
+    thumbprint, and generates the HTML report — without making any other
+    changes. Useful for a pre-commissioning inventory pass to collect
+    thumbprints before running the full script. Credentials are still
+    required to connect.
+
 .EXAMPLE
     .\HostPrep.ps1
 
@@ -84,9 +109,12 @@
 .EXAMPLE
     .\HostPrep.ps1 -DryRun
 
+.EXAMPLE
+    .\HostPrep.ps1 -WhatIfReport
+
 .NOTES
     Script  : HostPrep.ps1
-    Version : 2.9.1
+    Version : 3.1.0
     Author  : Paul van Dieen
     Blog    : https://www.hollebollevsan.nl
     Date    : 2026-03-07
@@ -136,6 +164,22 @@
         2.9.1 - Fixed HTML report Successful count (Measure-Object + [int]
                 cast prevents single-result .Count returning empty);
                 moved Add-Type System.Web to Initialisation region
+        3.0.0 - Added $OptionalAdvancedSettings config hashtable for
+                per-deployment optional settings (disabled by default);
+                includes esxAdminsGroup, lsomEnableRebuildOnLSE, and
+                SSD TRIM settings (HardwareAcceleratedMove/Init);
+                added OptionalSettings column to summary table;
+                expanded description with optional settings documentation
+        3.1.0 - Wait-ESXiHostOnline return value now checked explicitly;
+                optional settings loop uses per-setting try/catch with
+                individual error reporting and Partial state when only
+                some settings fail; type notes and re-run warning added
+                to $OptionalAdvancedSettings comments; added -WhatIfReport
+                switch for thumbprint-only collection pass without changes;
+                HTML report gains clipboard copy button per thumbprint,
+                cert expiry column with amber/red highlighting at 90/30
+                days, and Optional Settings column; Expiry captured from
+                cert check and stored in $hostResult
 #>
 
 [CmdletBinding()]
@@ -143,6 +187,8 @@ param (
     [string[]]$NtpServers = @("pool.ntp.org"),
 
     [switch]$DryRun,
+
+    [switch]$WhatIfReport,
 
     [string]$LogPath = [System.IO.Path]::Combine(
         [Environment]::GetFolderPath('Desktop'),
@@ -159,11 +205,63 @@ param (
 
 $ScriptMeta = @{
     Name    = "HostPrep.ps1"
-    Version = "2.9.1"
+    Version = "3.1.0"
     Author  = "Paul van Dieen"
     Blog    = "https://www.hollebollevsan.nl"
-    Date    = "2026-03-08"
+    Date    = "2026-03-09"
 }
+
+#endregion
+
+#region --- Optional Advanced Settings ---
+#
+# Set Enabled = $true for any setting you want to apply on every host.
+# Settings with Enabled = $false are silently skipped.
+# Value types: strings must be quoted ("like this"), integers unquoted (1 or 0),
+# booleans as $true/$false. Using the wrong type will be silently accepted by
+# Set-AdvancedSetting but may have no effect — check the type note per setting.
+#
+$OptionalAdvancedSettings = @(
+
+    # ESX Admins group — the Active Directory group whose members are granted
+    # full administrative access to the ESXi host. Change the value to match
+    # your AD group name before enabling.
+    # Value type: string
+    # Note: if you re-run the script with a different value, the setting will
+    # be overwritten. Verify the group name before enabling across all hosts.
+    @{
+        Name    = "Config.HostAgent.plugins.hostsvc.esxAdminsGroup"
+        Value   = "ESX Admins"
+        Enabled = $false
+        Label   = "ESX Admins group"
+    },
+
+    # vSAN rebuild on Latency Sensitive Equipment (LSE) — controls whether
+    # vSAN triggers an automatic rebuild when a device is marked as LSE.
+    # Value type: integer (1 = enabled, 0 = disabled)
+    @{
+        Name    = "LSOM.lsomEnableRebuildOnLSE"
+        Value   = 1
+        Enabled = $false
+        Label   = "vSAN rebuild on LSE"
+    },
+
+    # SSD TRIM support — instructs ESXi to issue TRIM/UNMAP commands to
+    # compatible SSDs, allowing the drive firmware to reclaim freed blocks.
+    # Value type: integer (1 = enabled, 0 = disabled)
+    @{
+        Name    = "DataMover.HardwareAcceleratedMove"
+        Value   = 1
+        Enabled = $false
+        Label   = "SSD TRIM - HardwareAcceleratedMove"
+    },
+    @{
+        Name    = "DataMover.HardwareAcceleratedInit"
+        Value   = 1
+        Enabled = $false
+        Label   = "SSD TRIM - HardwareAcceleratedInit"
+    }
+)
 
 #endregion
 
@@ -190,6 +288,13 @@ Write-Host ""
 
 if ($DryRun) {
     Write-Host "  *** DRY RUN MODE - No changes will be made ***" -ForegroundColor Yellow
+    Write-Host ""
+}
+
+if ($WhatIfReport) {
+    Write-Host "  *** WHATIF REPORT MODE - Thumbprint collection only ***" -ForegroundColor Cyan
+    Write-Host "  Connects to each host, reads certificate thumbprint and expiry," -ForegroundColor DarkGray
+    Write-Host "  then generates the HTML report. No changes will be made." -ForegroundColor DarkGray
     Write-Host ""
 }
 
@@ -752,10 +857,12 @@ foreach ($esxiHost in $targetEsxiHosts) {
         Connected         = $false
         NTP               = "Skipped"
         AdvancedSettings  = "Skipped"
+        OptionalSettings  = "Skipped"
         CertRegen         = "Skipped"
         Rebooted          = "Skipped"
         PasswordReset     = "Skipped"
         Thumbprint        = "N/A"
+        Expiry            = "N/A"
         Error             = ""
     }
 
@@ -769,6 +876,20 @@ foreach ($esxiHost in $targetEsxiHosts) {
             $hostResult.Connected = $true
             Write-Host "  Connected to $esxiHost." -ForegroundColor Green
             $vmHostObj = Get-VMHost -Name $esxiHost -ErrorAction Stop
+        }
+
+        # --- WhatIfReport: cert/thumbprint read only, skip all other steps ---
+        if ($WhatIfReport) {
+            Write-Host "`n  [WhatIfReport] Reading certificate..." -ForegroundColor Cyan
+            $certCheck = Test-ESXiCertificateNeedsRegen -VMHost $esxiHost
+            $hostResult.Thumbprint = $certCheck.Thumbprint
+            $hostResult.Expiry     = $certCheck.Expiry
+            $hostResult.CertRegen  = if ($certCheck.NeedsRegen) { "Regen needed" } else { "OK" }
+            Write-Host "  Thumbprint : $($certCheck.Thumbprint)" -ForegroundColor DarkGray
+            Write-Host "  CN         : $($certCheck.CN)"         -ForegroundColor DarkGray
+            Write-Host "  Expiry     : $($certCheck.Expiry)"     -ForegroundColor DarkGray
+            # Skip all remaining steps - jump to finally for disconnect
+            return
         }
 
         # --- NTP ---
@@ -812,6 +933,37 @@ foreach ($esxiHost in $targetEsxiHosts) {
             Write-Warning "  Advanced settings failed: $_"
         }
 
+        # --- Optional Advanced Settings ---
+        $enabledOptional = $OptionalAdvancedSettings | Where-Object { $_.Enabled -eq $true }
+        if ($enabledOptional) {
+            Write-Host "`n  [Optional Advanced Settings]" -ForegroundColor Cyan
+            $optionalFailures = [System.Collections.Generic.List[string]]::new()
+
+            foreach ($setting in $enabledOptional) {
+                try {
+                    if ($DryRun) {
+                        Write-Host "  [DRY RUN] Would set '$($setting.Name)' = $($setting.Value)  ($($setting.Label))" -ForegroundColor DarkYellow
+                    } else {
+                        Get-AdvancedSetting -Entity $vmHostObj -Name $setting.Name |
+                            Set-AdvancedSetting -Value $setting.Value -Confirm:$false | Out-Null
+                        Write-Host "  Set '$($setting.Name)' = $($setting.Value)  ($($setting.Label))" -ForegroundColor Green
+                    }
+                } catch {
+                    $msg = "$($setting.Label): $_"
+                    $optionalFailures.Add($msg)
+                    Write-Warning "  Failed to set '$($setting.Name)': $_"
+                }
+            }
+
+            $hostResult.OptionalSettings = if ($optionalFailures.Count -eq 0) {
+                "OK"
+            } elseif ($optionalFailures.Count -lt @($enabledOptional).Count) {
+                "Partial"
+            } else {
+                "FAILED"
+            }
+        }
+
         # --- Certificate Regeneration ---
         Write-Host "`n  [Certificate Regeneration]" -ForegroundColor Cyan
         try {
@@ -830,6 +982,7 @@ foreach ($esxiHost in $targetEsxiHosts) {
             } else {
                 $certCheck = Test-ESXiCertificateNeedsRegen -VMHost $esxiHost
                 $hostResult.Thumbprint = $certCheck.Thumbprint
+                $hostResult.Expiry     = $certCheck.Expiry
 
                 if (-not $certCheck.NeedsRegen) {
                     $hostResult.CertRegen = "Skipped"
@@ -855,7 +1008,10 @@ foreach ($esxiHost in $targetEsxiHosts) {
                         Write-Host "  Reboot issued. Waiting for host to come back online..." -ForegroundColor Yellow
 
                         # Wait for the host to come back
-                        Wait-ESXiHostOnline -VMHost $esxiHost
+                        $hostOnline = Wait-ESXiHostOnline -VMHost $esxiHost
+                        if (-not $hostOnline) {
+                            throw "Host $esxiHost did not come back online within the timeout period."
+                        }
                         $hostResult.Rebooted = "OK"
 
                         # Reconnect for remaining steps (password reset)
@@ -868,6 +1024,7 @@ foreach ($esxiHost in $targetEsxiHosts) {
                         Write-Host "  Reading new certificate thumbprint..." -ForegroundColor Cyan
                         $newCertCheck = Test-ESXiCertificateNeedsRegen -VMHost $esxiHost
                         $hostResult.Thumbprint = $newCertCheck.Thumbprint
+                        $hostResult.Expiry     = $newCertCheck.Expiry
                     }
                 }
             }
@@ -926,6 +1083,7 @@ function Write-ColorSummaryTable {
         Connected        = 11
         NTP              = 6
         AdvancedSettings = 17
+        OptionalSettings = 17
         CertRegen        = 10
         Rebooted         = 10
         PasswordReset    = 15
@@ -940,6 +1098,7 @@ function Write-ColorSummaryTable {
         if ($value -eq $false -or $value -like "FAILED*")  { return "Red"      }
         if ($value -eq "Skipped")                          { return "DarkGray" }
         if ($value -eq "Manual")                           { return "Yellow"   }
+        if ($value -eq "Partial")                          { return "Yellow"   }
         if ($value -like "Unexpected*")                    { return "Yellow"   }
         return "White"
     }
@@ -1013,7 +1172,22 @@ function Write-HtmlReport {
         $thumbCell = if ($row.Thumbprint -eq "N/A") {
             "<td class='na'>N/A</td>"
         } else {
-            "<td class='thumbprint'>$([System.Web.HttpUtility]::HtmlEncode($row.Thumbprint))</td>"
+            $encoded = [System.Web.HttpUtility]::HtmlEncode($row.Thumbprint)
+            "<td class='thumbprint'><span class='thumb-text'>$encoded</span><button class='copy-btn' onclick='copyThumb(this)' title='Copy to clipboard'>&#128203;</button></td>"
+        }
+
+        $expiryCell = if ($row.Expiry -eq "N/A") {
+            "<td class='na'>N/A</td>"
+        } else {
+            # Highlight expiry if within 90 days
+            try {
+                $expiryDate = [datetime]::ParseExact($row.Expiry, "yyyy-MM-dd HH:mm:ss", $null)
+                $daysLeft = ($expiryDate - (Get-Date)).Days
+                $expiryClass = if ($daysLeft -lt 30) { "expiry-critical" } elseif ($daysLeft -lt 90) { "expiry-warn" } else { "" }
+                "<td class='$expiryClass'>$([System.Web.HttpUtility]::HtmlEncode($row.Expiry))</td>"
+            } catch {
+                "<td>$([System.Web.HttpUtility]::HtmlEncode($row.Expiry))</td>"
+            }
         }
 
         $statusIcon = if ($row.Error) { "&#10008;" } elseif ($overallOk) { "&#10004;" } else { "&#9888;" }
@@ -1022,10 +1196,12 @@ function Write-HtmlReport {
         <tr class='$rowClass'>
             <td>$([System.Web.HttpUtility]::HtmlEncode($row.Host))</td>
             $thumbCell
-            <td>$(if ($row.CertRegen -eq 'OK') { 'Regenerated' } elseif ($row.CertRegen -eq 'Skipped') { 'Not needed' } elseif ($row.CertRegen -eq 'Manual') { 'Manual required' } else { [System.Web.HttpUtility]::HtmlEncode($row.CertRegen) })</td>
+            $expiryCell
+            <td>$(if ($row.CertRegen -eq 'OK') { 'Regenerated' } elseif ($row.CertRegen -eq 'Skipped') { 'Not needed' } elseif ($row.CertRegen -eq 'Manual') { 'Manual required' } elseif ($row.CertRegen -eq 'Regen needed') { '<span class=expiry-warn>Regen needed</span>' } else { [System.Web.HttpUtility]::HtmlEncode($row.CertRegen) })</td>
             <td>$(if ($row.Rebooted -eq 'OK') { 'Yes' } elseif ($row.Rebooted -eq 'Skipped') { 'Not needed' } elseif ($row.Rebooted -eq 'Manual') { 'Manual required' } else { [System.Web.HttpUtility]::HtmlEncode($row.Rebooted) })</td>
             <td>$(if ($row.NTP -eq 'OK') { 'OK' } else { [System.Web.HttpUtility]::HtmlEncode($row.NTP) })</td>
             <td>$(if ($row.AdvancedSettings -eq 'OK') { 'OK' } else { [System.Web.HttpUtility]::HtmlEncode($row.AdvancedSettings) })</td>
+            <td>$(if ($row.OptionalSettings -eq 'OK') { 'OK' } elseif ($row.OptionalSettings -eq 'Skipped') { '<span style=color:#6e7681>Skipped</span>' } elseif ($row.OptionalSettings -eq 'Partial') { '<span class=expiry-warn>Partial</span>' } else { [System.Web.HttpUtility]::HtmlEncode($row.OptionalSettings) })</td>
             <td>$(if ($row.PasswordReset -eq 'OK') { 'Reset' } elseif ($row.PasswordReset -eq 'Skipped') { 'Not requested' } else { [System.Web.HttpUtility]::HtmlEncode($row.PasswordReset) })</td>
             <td class='status'>$statusIcon $(if ($row.Error) { [System.Web.HttpUtility]::HtmlEncode($row.Error) } else { '' })</td>
         </tr>"
@@ -1044,7 +1220,7 @@ function Write-HtmlReport {
   header { margin-bottom: 28px; border-bottom: 2px solid #1f6feb; padding-bottom: 16px; }
   header h1 { font-size: 1.6rem; color: #58a6ff; letter-spacing: 0.5px; }
   header p  { font-size: 0.85rem; color: #8b949e; margin-top: 4px; }
-  .meta { display: flex; gap: 32px; margin-bottom: 24px; }
+  .meta { display: flex; gap: 32px; margin-bottom: 24px; flex-wrap: wrap; }
   .meta-item { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px 20px; }
   .meta-item .label { font-size: 0.75rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
   .meta-item .value { font-size: 1.1rem; font-weight: 600; color: #c9d1d9; margin-top: 2px; }
@@ -1054,9 +1230,15 @@ function Write-HtmlReport {
   tbody tr:hover { background: #1c2128; }
   tbody tr:last-child { border-bottom: none; }
   td { padding: 10px 14px; vertical-align: top; }
-  td.thumbprint { font-family: 'Consolas', 'Courier New', monospace; font-size: 0.72rem; color: #79c0ff; word-break: break-all; max-width: 420px; }
+  td.thumbprint { font-family: 'Consolas', 'Courier New', monospace; font-size: 0.72rem; color: #79c0ff; word-break: break-all; max-width: 380px; }
+  .thumb-text { vertical-align: middle; }
+  .copy-btn { margin-left: 8px; background: #21262d; border: 1px solid #30363d; border-radius: 4px; color: #8b949e; cursor: pointer; font-size: 0.75rem; padding: 2px 6px; vertical-align: middle; transition: background 0.15s, color 0.15s; }
+  .copy-btn:hover { background: #1f6feb; color: #fff; border-color: #1f6feb; }
+  .copy-btn.copied { background: #238636; color: #fff; border-color: #238636; }
   td.na { color: #6e7681; font-style: italic; }
   td.status { white-space: nowrap; }
+  .expiry-warn     { color: #d29922; }
+  .expiry-critical { color: #f85149; font-weight: 600; }
   tr.ok  td.status { color: #3fb950; }
   tr.fail td.status { color: #f85149; }
   tr.warn td.status { color: #d29922; }
@@ -1099,16 +1281,18 @@ function Write-HtmlReport {
     <tr>
       <th>Host FQDN</th>
       <th>SSL Thumbprint (SHA-256)</th>
+      <th>Cert Expiry</th>
       <th>Cert Regen</th>
       <th>Rebooted</th>
       <th>NTP</th>
       <th>Advanced Settings</th>
+      <th>Optional Settings</th>
       <th>Password Reset</th>
       <th>Status</th>
     </tr>
   </thead>
   <tbody>
-    $($rows -join "`n")
+    `$(`$rows -join "`n")
   </tbody>
 </table>
 
@@ -1117,9 +1301,25 @@ function Write-HtmlReport {
   present on each host at the time this script ran. Use these values to verify host identity
   when adding hosts to SDDC Manager during VCF commissioning.
   Thumbprints for hosts where certificate regeneration was performed reflect the <em>new</em> certificate.
+  Expiry dates within 90 days are shown in <span class="expiry-warn">amber</span>;
+  within 30 days in <span class="expiry-critical">red</span>.
 </div>
 
 <footer>HostPrep.ps1 &bull; $($ScriptMeta.Author) &bull; $($ScriptMeta.Blog)</footer>
+
+<script>
+function copyThumb(btn) {
+    var text = btn.previousElementSibling.textContent.trim();
+    navigator.clipboard.writeText(text).then(function() {
+        btn.textContent = 'Copied!';
+        btn.classList.add('copied');
+        setTimeout(function() {
+            btn.textContent = '\u{1F4CB}';
+            btn.classList.remove('copied');
+        }, 2000);
+    });
+}
+</script>
 
 </body>
 </html>
@@ -1144,6 +1344,7 @@ Write-Host "OK  "      -NoNewline -ForegroundColor Green
 Write-Host "FAILED  "  -NoNewline -ForegroundColor Red
 Write-Host "Skipped  " -NoNewline -ForegroundColor DarkGray
 Write-Host "Manual  "  -NoNewline -ForegroundColor Yellow
+Write-Host "Partial  " -NoNewline -ForegroundColor Yellow
 Write-Host "Warning"               -ForegroundColor Yellow
 Write-Host ""
 Write-Host ("  Log written to    : {0}" -f $LogPath) -ForegroundColor DarkGray
