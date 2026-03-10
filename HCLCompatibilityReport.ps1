@@ -303,15 +303,42 @@ foreach ($VMHost in $Hosts) {
 
             # PCI IDs -- look up by VMkernel name (vmhba0, vmhba1, ...)
             # $Hba.Device is the vmhba name; it appears as VMkernelName in pci list
-            $HbaPci    = $PciByVmkName[$Hba.Device]
-            # Fallback: try matching by PCI address embedded in $Hba.Device or $Hba.PciId
+            $HbaPci = $PciByVmkName[$Hba.Device]
+
+            # Fallback 1: try matching by PCI address from $Hba.PciId
             if (-not $HbaPci -and $Hba.PciId) {
                 $HbaPci = $PciByAddress[$Hba.PciId]
             }
-            if (-not $HbaPci) {
-                # Last resort: scan all PCI devices for description substring match
+
+            # Fallback 2: exact DeviceName match (most accurate — avoids wrong vendor matches)
+            if (-not $HbaPci -and $Hba.Model) {
                 $HbaPci = $AllPciDevices | Where-Object {
-                    $_.DeviceName -and $Hba.Model -and $_.DeviceName -like "*$($Hba.Model.Split(' ')[0])*"
+                    $_.DeviceName -and $_.DeviceName.Trim() -eq $Hba.Model.Trim()
+                } | Select-Object -First 1
+            }
+
+            # Fallback 3: match by driver module name scoped to devices without a VMkernelName
+            if (-not $HbaPci -and $Hba.Driver) {
+                $HbaPci = $AllPciDevices | Where-Object {
+                    ($_.ModuleName -eq $Hba.Driver) -and (-not $_.VMkernelName -or $_.VMkernelName -eq "")
+                } | Select-Object -First 1
+            }
+
+            # Fallback 4: partial model match using significant words (3+ chars), longest match first
+            if (-not $HbaPci -and $Hba.Model) {
+                $modelWords = ($Hba.Model -split '\s+' | Where-Object { $_.Length -gt 3 } | Select-Object -First 4) -join ' '
+                if ($modelWords) {
+                    $HbaPci = $AllPciDevices | Where-Object {
+                        $_.DeviceName -and $_.DeviceName -like "*$modelWords*"
+                    } | Select-Object -First 1
+                }
+            }
+
+            # Fallback 5: last resort — two-word prefix match (avoids single-word false positives)
+            if (-not $HbaPci -and $Hba.Model) {
+                $twoWords = ($Hba.Model -split '\s+' | Select-Object -First 2) -join ' '
+                $HbaPci = $AllPciDevices | Where-Object {
+                    $_.DeviceName -and $_.DeviceName -like "*$twoWords*"
                 } | Select-Object -First 1
             }
 
