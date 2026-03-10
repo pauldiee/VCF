@@ -969,19 +969,34 @@ if ($TargetESXiVersion -ne "") {
         Export-Csv -Path $HclCsvPath -NoTypeInformation -Encoding UTF8
 
     # -------------------------------------------------------------------------
-    # HTML Report
+    # HTML Report - Tab per host, collapsible driver/fw rows
     # -------------------------------------------------------------------------
     $HclHtmlPath = Join-Path $OutputPath "HCL_Check_${TargetESXiVersion -replace '[^a-zA-Z0-9]','_'}_${Timestamp}.html"
-
-    $statusCounts = @{ Supported = $supported; "Not Supported" = $notSupported; "Not Found" = $notFound; Error = $errors }
     $totalChecked = $checked
-
-    # Build device rows grouped by host
-    $deviceRowsHtml = ""
     $groupedByHost = $HclResults | Group-Object HostName
+
+    # Build tab buttons and tab content panels
+    $tabButtonsHtml = ""
+    $tabPanelsHtml  = ""
+    $tabIndex = 0
+
     foreach ($hostGroup in $groupedByHost) {
-        $hostName = $hostGroup.Name
-        $deviceRowsHtml += "<tr class='host-header'><td colspan='8'>$hostName</td></tr>`n"
+        $hostName    = $hostGroup.Name
+        $safeId      = $hostName -replace '[^a-zA-Z0-9]','-'
+        $activeBtn   = if ($tabIndex -eq 0) { " active" } else { "" }
+        $activePanel = if ($tabIndex -eq 0) { " active" } else { "" }
+
+        $hostOk   = ($hostGroup.Group | Where-Object { $_.HCL_Status -eq "Supported" }).Count
+        $hostFail = ($hostGroup.Group | Where-Object { $_.HCL_Status -eq "Not Supported" }).Count
+        $hostWarn = ($hostGroup.Group | Where-Object { $_.HCL_Status -eq "Not Found" }).Count
+
+        $tabBadge = "<span class='tab-ok'>$hostOk</span>"
+        if ($hostFail -gt 0) { $tabBadge += " <span class='tab-fail'>$hostFail</span>" }
+        if ($hostWarn -gt 0) { $tabBadge += " <span class='tab-warn'>$hostWarn</span>" }
+
+        $tabButtonsHtml += "<button class='tab-btn$activeBtn' onclick='showTab(this,`"$safeId`")'>$hostName $tabBadge</button>`n"
+
+        $rowsHtml = ""
         foreach ($r in $hostGroup.Group) {
             $statusClass = switch ($r.HCL_Status) {
                 "Supported"     { "status-ok" }
@@ -990,47 +1005,28 @@ if ($TargetESXiVersion -ne "") {
                 default         { "status-error" }
             }
 
-            # Build driver/firmware table if available
-            $dfHtml = ""
-            if ($r._DriverFirmwareCombos -and $r._DriverFirmwareCombos.Count -gt 0) {
-                $dfHtml = "<table class='df-table'><thead><tr><th>Driver Name</th><th>Driver Version</th><th>Firmware Version</th><th>Type</th></tr></thead><tbody>"
-                foreach ($df in $r._DriverFirmwareCombos) {
-                    $fwDisplay = $df.FirmwareVersion
-                    if ($df.AdditionalFirmwareVersion) { $fwDisplay += " <span class='alt-fw'>or $($df.AdditionalFirmwareVersion)</span>" }
-                    $dfHtml += "<tr><td>$($df.DriverName)</td><td>$($df.DriverVersion)</td><td>$fwDisplay</td><td>$($df.Type)</td></tr>"
-                }
-                $dfHtml += "</tbody></table>"
-            } else {
-                $dfHtml = "<span class='no-data'>N/A</span>"
-            }
-
             if ($r.HardwareCategory -eq "CPU") {
-                $deviceRowsHtml += @"
-<tr>
-  <td>$($r.HardwareCategory)</td>
-  <td>$($r.Vendor)</td>
-  <td>$($r.Model)</td>
-  <td><span class='pci-id'>HCL Series: $($r.HCL_Details)</span></td>
-  <td colspan='2'><span class='version'>$($r.HCL_Releases)</span></td>
-  <td><span class='badge $statusClass'>$($r.HCL_Status)</span></td>
-  <td><span class='no-data'>N/A</span></td>
-</tr>
-"@
+                $rowsHtml += "<tr><td><span class='cat-badge'>CPU</span></td><td>$($r.Vendor)</td><td>$($r.Model)</td><td><span class='pci-id'>$($r.HCL_Details)</span></td><td colspan='2'><span class='version'>$($r.HCL_Releases)</span></td><td><span class='badge $statusClass'>$($r.HCL_Status)</span></td><td><span class='no-data'>-</span></td></tr>`n"
             } else {
-                $deviceRowsHtml += @"
-<tr>
-  <td>$($r.HardwareCategory)</td>
-  <td>$($r.Vendor)</td>
-  <td>$($r.Model)</td>
-  <td><span class='pci-id'>VID:$($r.VendorID) DID:$($r.DeviceID)</span><br><span class='pci-id'>SVID:$($r.SubVendorID) SDID:$($r.SubDeviceID)</span></td>
-  <td>$($r.Driver)<br><span class='version'>$($r.DriverVersion)</span></td>
-  <td>$($r.FirmwareVersion)</td>
-  <td><span class='badge $statusClass'>$($r.HCL_Status)</span></td>
-  <td>$dfHtml</td>
-</tr>
-"@
+                $dfInner = ""
+                if ($r._DriverFirmwareCombos -and $r._DriverFirmwareCombos.Count -gt 0) {
+                    $dfCount = $r._DriverFirmwareCombos.Count
+                    $dfInner = "<div class='df-toggle' onclick='toggleDf(this)'>&#9654; $dfCount combination(s)</div><div class='df-body'><table class='df-table'><thead><tr><th>Driver</th><th>Version</th><th>Firmware</th><th>Type</th></tr></thead><tbody>"
+                    foreach ($df in $r._DriverFirmwareCombos) {
+                        $fwDisplay = $df.FirmwareVersion
+                        if ($df.AdditionalFirmwareVersion) { $fwDisplay += " / $($df.AdditionalFirmwareVersion)" }
+                        $dfInner += "<tr><td>$($df.DriverName)</td><td>$($df.DriverVersion)</td><td>$fwDisplay</td><td>$($df.Type)</td></tr>"
+                    }
+                    $dfInner += "</tbody></table></div>"
+                } else {
+                    $dfInner = "<span class='no-data'>-</span>"
+                }
+                $rowsHtml += "<tr><td><span class='cat-badge'>$($r.HardwareCategory)</span></td><td>$($r.Vendor)</td><td>$($r.Model)</td><td><span class='pci-id'>VID:$($r.VendorID) DID:$($r.DeviceID)<br>SVID:$($r.SubVendorID)</span></td><td>$($r.Driver)<br><span class='version'>$($r.DriverVersion)</span></td><td><span class='version'>$($r.FirmwareVersion)</span></td><td><span class='badge $statusClass'>$($r.HCL_Status)</span></td><td>$dfInner</td></tr>`n"
             }
         }
+
+        $tabPanelsHtml += "<div id='tab-$safeId' class='tab-panel$activePanel'><table class='main'><thead><tr><th>Type</th><th>Vendor</th><th>Model</th><th>PCI IDs</th><th>Installed Driver</th><th>Installed FW</th><th>HCL Status</th><th>Required Driver &amp; FW</th></tr></thead><tbody>$rowsHtml</tbody></table></div>`n"
+        $tabIndex++
     }
 
     $htmlReport = @"
@@ -1039,104 +1035,93 @@ if ($TargetESXiVersion -ne "") {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>vSphere HCL Report - $TargetESXiVersion</title>
+<title>HCL Report - $TargetESXiVersion</title>
 <style>
   :root {
-    --bg: #0f1117; --surface: #1a1d27; --surface2: #22263a; --surface3: #2a2f45;
-    --border: #2e3352; --text: #e2e8f0; --text-muted: #64748b; --text-dim: #94a3b8;
-    --ok: #22c55e; --ok-bg: rgba(34,197,94,.12); --ok-border: rgba(34,197,94,.3);
-    --fail: #ef4444; --fail-bg: rgba(239,68,68,.12); --fail-border: rgba(239,68,68,.3);
-    --warn: #f59e0b; --warn-bg: rgba(245,158,11,.12); --warn-border: rgba(245,158,11,.3);
-    --error-bg: rgba(100,116,139,.12); --error-border: rgba(100,116,139,.3);
-    --accent: #3b82f6;
+    --bg:#0f1117;--surface:#1a1d27;--surface2:#22263a;--surface3:#2a2f45;
+    --border:#2e3352;--text:#e2e8f0;--text-muted:#64748b;--text-dim:#94a3b8;
+    --ok:#22c55e;--ok-bg:rgba(34,197,94,.12);--ok-border:rgba(34,197,94,.3);
+    --fail:#ef4444;--fail-bg:rgba(239,68,68,.12);--fail-border:rgba(239,68,68,.3);
+    --warn:#f59e0b;--warn-bg:rgba(245,158,11,.12);--warn-border:rgba(245,158,11,.3);
+    --error-bg:rgba(100,116,139,.12);--error-border:rgba(100,116,139,.3);--accent:#3b82f6;
   }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); }
-  header { background: linear-gradient(135deg, #0d1b3e 0%, #1e3a8a 100%);
-           border-bottom: 1px solid var(--border); padding: 32px 40px; }
-  header h1 { font-size: 24px; font-weight: 700; color: #fff; }
-  header p { margin-top: 6px; color: #93c5fd; font-size: 14px; }
-  .summary { display: flex; gap: 16px; padding: 24px 40px; flex-wrap: wrap; }
-  .card { background: var(--surface); border-radius: 10px; padding: 20px 28px; flex: 1; min-width: 140px;
-          border: 1px solid var(--border); border-top: 4px solid var(--border); }
-  .card.ok   { border-top-color: var(--ok); }
-  .card.fail { border-top-color: var(--fail); }
-  .card.warn { border-top-color: var(--warn); }
-  .card .count { font-size: 36px; font-weight: 800; line-height: 1; color: var(--text-dim); }
-  .card.ok   .count { color: var(--ok); }
-  .card.fail .count { color: var(--fail); }
-  .card.warn .count { color: var(--warn); }
-  .card .label { font-size: 13px; color: var(--text-muted); margin-top: 4px; }
-  .content { padding: 0 40px 40px; }
-  table.main { width: 100%; border-collapse: collapse; background: var(--surface);
-               border-radius: 10px; overflow: hidden; border: 1px solid var(--border); }
-  table.main thead tr { background: var(--surface3); }
-  table.main thead th { padding: 13px 14px; text-align: left; font-size: 11px; color: var(--text-dim);
-                        font-weight: 600; text-transform: uppercase; letter-spacing: .06em; white-space: nowrap;
-                        border-bottom: 1px solid var(--border); }
-  table.main tbody tr { border-bottom: 1px solid var(--border); transition: background .15s; }
-  table.main tbody tr:hover { background: var(--surface2); }
-  tr.host-header td { background: var(--surface3); color: var(--accent); font-weight: 700;
-                      font-size: 12px; padding: 7px 14px; letter-spacing: .06em; text-transform: uppercase;
-                      border-bottom: 1px solid var(--border); }
-  table.main tbody td { padding: 11px 14px; font-size: 13px; vertical-align: top; color: var(--text); }
-  .pci-id { font-family: 'Courier New', monospace; font-size: 11px; color: var(--text-muted); }
-  .version { font-size: 11px; color: var(--text-muted); }
-  .badge { display: inline-block; padding: 3px 10px; border-radius: 9999px; font-size: 11px; font-weight: 600; white-space: nowrap; }
-  .status-ok    { background: var(--ok-bg);    color: var(--ok);    border: 1px solid var(--ok-border); }
-  .status-fail  { background: var(--fail-bg);  color: var(--fail);  border: 1px solid var(--fail-border); }
-  .status-warn  { background: var(--warn-bg);  color: var(--warn);  border: 1px solid var(--warn-border); }
-  .status-error { background: var(--error-bg); color: var(--text-muted); border: 1px solid var(--error-border); }
-  table.df-table { width: 100%; border-collapse: collapse; margin-top: 4px; border-radius: 6px; overflow: hidden; border: 1px solid var(--border); }
-  table.df-table th { background: var(--surface3); font-size: 10px; font-weight: 600; text-transform: uppercase;
-                      letter-spacing: .05em; color: var(--text-dim); padding: 5px 8px; text-align: left;
-                      border-bottom: 1px solid var(--border); }
-  table.df-table td { font-size: 11px; padding: 5px 8px; border-top: 1px solid var(--border);
-                      font-family: 'Courier New', monospace; color: #a5b4fc; }
-  table.df-table tr:hover td { background: var(--surface3); }
-  .alt-fw { color: var(--text-muted); }
-  .no-data { color: var(--text-muted); font-size: 12px; }
-  footer { text-align: center; padding: 20px; font-size: 12px; color: var(--text-muted); }
-  footer a { color: var(--accent); text-decoration: none; }
-  footer a:hover { text-decoration: underline; }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text)}
+  header{background:linear-gradient(135deg,#0d1b3e,#1e3a8a);border-bottom:1px solid var(--border);padding:22px 32px}
+  header h1{font-size:20px;font-weight:700;color:#fff}
+  header p{margin-top:4px;color:#93c5fd;font-size:12px}
+  .summary{display:flex;gap:12px;padding:16px 32px;flex-wrap:wrap}
+  .card{background:var(--surface);border-radius:8px;padding:14px 20px;flex:1;min-width:110px;border:1px solid var(--border);border-top:3px solid var(--border)}
+  .card.ok{border-top-color:var(--ok)}.card.fail{border-top-color:var(--fail)}.card.warn{border-top-color:var(--warn)}
+  .card .count{font-size:28px;font-weight:800;line-height:1;color:var(--text-dim)}
+  .card.ok .count{color:var(--ok)}.card.fail .count{color:var(--fail)}.card.warn .count{color:var(--warn)}
+  .card .label{font-size:11px;color:var(--text-muted);margin-top:3px}
+  .tabs{display:flex;gap:2px;padding:0 32px;border-bottom:1px solid var(--border);flex-wrap:wrap;overflow-x:auto}
+  .tab-btn{background:transparent;border:none;border-bottom:2px solid transparent;color:var(--text-muted);padding:10px 14px;cursor:pointer;font-size:12px;font-family:inherit;margin-bottom:-1px;transition:all .15s;white-space:nowrap}
+  .tab-btn:hover{color:var(--text)}.tab-btn.active{color:var(--accent);border-bottom-color:var(--accent)}
+  .tab-ok{background:var(--ok-bg);color:var(--ok);border:1px solid var(--ok-border);border-radius:9999px;padding:1px 5px;font-size:10px;font-weight:700}
+  .tab-fail{background:var(--fail-bg);color:var(--fail);border:1px solid var(--fail-border);border-radius:9999px;padding:1px 5px;font-size:10px;font-weight:700}
+  .tab-warn{background:var(--warn-bg);color:var(--warn);border:1px solid var(--warn-border);border-radius:9999px;padding:1px 5px;font-size:10px;font-weight:700}
+  .tab-panel{display:none;padding:16px 32px 32px}.tab-panel.active{display:block}
+  table.main{width:100%;border-collapse:collapse;background:var(--surface);border-radius:8px;overflow:hidden;border:1px solid var(--border)}
+  table.main thead tr{background:var(--surface3)}
+  table.main thead th{padding:9px 11px;text-align:left;font-size:10px;color:var(--text-dim);font-weight:600;text-transform:uppercase;letter-spacing:.06em;white-space:nowrap;border-bottom:1px solid var(--border)}
+  table.main tbody tr{border-bottom:1px solid var(--border);transition:background .1s}
+  table.main tbody tr:hover{background:var(--surface2)}
+  table.main tbody td{padding:8px 11px;font-size:12px;vertical-align:top;color:var(--text)}
+  .cat-badge{display:inline-block;background:var(--surface3);color:var(--text-dim);border:1px solid var(--border);border-radius:4px;padding:1px 5px;font-size:9px;font-weight:700;text-transform:uppercase;white-space:nowrap}
+  .pci-id{font-family:'Courier New',monospace;font-size:10px;color:var(--text-muted)}
+  .version{font-size:10px;color:var(--text-muted)}
+  .badge{display:inline-block;padding:2px 8px;border-radius:9999px;font-size:11px;font-weight:600;white-space:nowrap}
+  .status-ok{background:var(--ok-bg);color:var(--ok);border:1px solid var(--ok-border)}
+  .status-fail{background:var(--fail-bg);color:var(--fail);border:1px solid var(--fail-border)}
+  .status-warn{background:var(--warn-bg);color:var(--warn);border:1px solid var(--warn-border)}
+  .status-error{background:var(--error-bg);color:var(--text-muted);border:1px solid var(--error-border)}
+  .df-toggle{cursor:pointer;font-size:11px;color:var(--accent);user-select:none;padding:2px 0}
+  .df-toggle:hover{text-decoration:underline}
+  .df-body{display:none;margin-top:6px}
+  table.df-table{width:100%;border-collapse:collapse;border-radius:4px;overflow:hidden;border:1px solid var(--border)}
+  table.df-table th{background:var(--surface3);font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text-dim);padding:4px 7px;text-align:left;border-bottom:1px solid var(--border)}
+  table.df-table td{font-size:10px;padding:4px 7px;border-top:1px solid var(--border);font-family:'Courier New',monospace;color:#a5b4fc}
+  table.df-table tr:hover td{background:var(--surface3)}
+  .no-data{color:var(--text-muted);font-size:11px}
+  footer{text-align:center;padding:14px;font-size:11px;color:var(--text-muted);border-top:1px solid var(--border)}
+  footer a{color:var(--accent);text-decoration:none}
 </style>
 </head>
 <body>
 <header>
   <h1>vSphere HCL Compatibility Report</h1>
-  <p>Target Release: <strong>$TargetESXiVersion</strong> &nbsp;&bull;&nbsp; Generated: $(Get-Date -Format "yyyy-MM-dd HH:mm") &nbsp;&bull;&nbsp; Cluster: $ClusterName</p>
+  <p>Target: <strong>$TargetESXiVersion</strong> &bull; Generated: $(Get-Date -Format "yyyy-MM-dd HH:mm") &bull; Cluster: $ClusterName</p>
 </header>
 <div class="summary">
   <div class="card"><div class="count">$totalChecked</div><div class="label">Devices Checked</div></div>
   <div class="card ok"><div class="count">$supported</div><div class="label">Supported</div></div>
   <div class="card fail"><div class="count">$notSupported</div><div class="label">Not Supported</div></div>
-  <div class="card warn"><div class="count">$notFound</div><div class="label">Not Found in HCL</div></div>
+  <div class="card warn"><div class="count">$notFound</div><div class="label">Not Found</div></div>
   <div class="card"><div class="count">$errors</div><div class="label">Errors</div></div>
 </div>
-<div class="content">
-  <table class="main">
-    <thead>
-      <tr>
-        <th>Category</th>
-        <th>Vendor</th>
-        <th>Model</th>
-        <th>PCI IDs</th>
-        <th>Installed Driver</th>
-        <th>Installed FW</th>
-        <th>HCL Status</th>
-        <th>Required Driver &amp; Firmware Combinations</th>
-      </tr>
-    </thead>
-    <tbody>
-$deviceRowsHtml
-    </tbody>
-  </table>
-</div>
+<div class="tabs">
+$tabButtonsHtml</div>
+$tabPanelsHtml
 <footer>Broadcom HCL &bull; <a href="https://compatibilityguide.broadcom.com">compatibilityguide.broadcom.com</a></footer>
+<script>
+function showTab(btn,id){
+  document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('tab-'+id).classList.add('active');
+  btn.classList.add('active');
+}
+function toggleDf(el){
+  var b=el.nextElementSibling;
+  var open=b.style.display==='block';
+  b.style.display=open?'none':'block';
+  el.innerHTML=(open?'&#9654;':'&#9660;')+el.innerHTML.substring(1);
+}
+</script>
 </body>
 </html>
 "@
-
     $htmlReport | Out-File -FilePath $HclHtmlPath -Encoding UTF8
 
     Write-Host ""
