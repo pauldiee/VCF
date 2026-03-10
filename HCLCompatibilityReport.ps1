@@ -48,6 +48,7 @@
     Author           : Paul van Dieen
     Blog             : https://www.hollebollevsan.nl
     Original Idea    : Kabir Ali
+    Blog             : https://whatkabirwrites.nl/
 
 .CHANGELOG
     1.0.0 - Initial release. Hardware inventory (CPU, NIC, HBA, GPU) from vCenter.
