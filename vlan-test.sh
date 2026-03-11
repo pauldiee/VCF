@@ -278,8 +278,9 @@ for pg, data in groups.items():
     pg_fail = sum(1 for t in data['tests'] if t['status'] == 'FAIL')
     pg_warn = sum(1 for t in data['tests'] if t['status'] == 'WARN')
     pg_status = 'FAIL' if pg_fail > 0 else ('WARN' if pg_warn > 0 else 'PASS')
+    pg_safe = pg.replace("'", "\\'")
     rows += f'''
-    <tr class="pg-header" onclick="toggleGroup('{pg}')">
+    <tr class="pg-header" data-pg="{pg}" onclick="toggleGroup(this)">
       <td class="pg-name">▶ {pg}</td>
       <td>{data["desc"]}</td>
       <td colspan="2"><span class="badge badge-pass">{pg_pass} pass</span> <span class="badge badge-warn">{pg_warn} warn</span> <span class="badge badge-fail">{pg_fail} fail</span></td>
@@ -289,7 +290,7 @@ for pg, data in groups.items():
         s = t['status'].lower()
         icon = '✓' if t['status'] == 'PASS' else ('⚠' if t['status'] == 'WARN' else '✗')
         rows += f'''
-    <tr class="test-row group-{pg}" style="display:none">
+    <tr class="test-row" data-group="{pg}" style="display:none">
       <td class="indent">↳ {t["test"]}</td>
       <td colspan="2">{t["detail"]}</td>
       <td></td>
@@ -348,12 +349,13 @@ html = f"""<!DOCTYPE html>
 </table>
 <footer>vlan-test.sh &nbsp;·&nbsp; {ts} &nbsp;·&nbsp; click port group rows to expand tests</footer>
 <script>
-function toggleGroup(pg) {{
-  const rows = document.querySelectorAll('.group-' + pg);
-  const header = document.querySelector('[onclick="toggleGroup(\\'' + pg + '\\')"] td.pg-name');
+function toggleGroup(header) {{
+  const pg = header.getAttribute('data-pg');
+  const rows = document.querySelectorAll('[data-group="' + pg.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"]');
+  const nameCell = header.querySelector('.pg-name');
   const visible = rows[0] && rows[0].style.display !== 'none';
   rows.forEach(r => r.style.display = visible ? 'none' : 'table-row');
-  if (header) header.textContent = (visible ? '▶ ' : '▼ ') + pg;
+  if (nameCell) nameCell.textContent = (visible ? '▶ ' : '▼ ') + pg;
 }}
 </script>
 </body></html>"""
