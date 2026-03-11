@@ -699,14 +699,12 @@ function Invoke-BCGQuery {
         return [PSCustomObject]@{ Status = "Skipped"; Details = "Missing VID or DID"; Releases = ""; DriverFirmwareCombos = @() }
     }
 
-    # Build filters using the BCG portal's actual payload format
+    # Build filters using VID+DID only -- SVID is used client-side for bestEntry selection
+    # Including SVID in the API call can exclude chip-vendor entries that list the correct drivers
     $filters = @(
         @{ displayKey = "vid"; filterValues = @($vid, $vid) }
         @{ displayKey = "did"; filterValues = @($did, $did) }
     )
-    if ($svid) {
-        $filters += @{ displayKey = "svid"; filterValues = @($svid, $svid) }
-    }
 
     $payload = [ordered]@{
         programId = $Program
@@ -750,14 +748,16 @@ function Invoke-BCGQuery {
         return [PSCustomObject]@{ Status = "Not Found"; Details = "VID:$vid DID:$did not on HCL"; Releases = ""; DriverFirmwareCombos = @() }
     }
 
-    # Optionally narrow by SVID client-side using hoverData
+    # Narrow by SVID client-side for status/release matching
+    # But keep full results available for bestEntry selection (driver/fw lookup)
     $matched = $results
+    $svidMatched = $null
     if ($svid) {
-        $narrow = $results | Where-Object {
+        $svidMatched = $results | Where-Object {
             $svidEntry = $_.hoverData | Where-Object { $_.displayName -eq "SVID" }
             $svidEntry -and (Normalize-HexId $svidEntry.value) -eq $svid
         }
-        if ($narrow) { $matched = $narrow }
+        if ($svidMatched) { $matched = $svidMatched }
     }
 
     # Collect all supported release names across matched entries
@@ -801,36 +801,46 @@ function Invoke-BCGQuery {
         }
         if ($PSVersionTable.PSVersion.Major -ge 6) { $detailParams["SkipCertificateCheck"] = $true }
 
-        try {
-            $detailResp = Invoke-BCGRestMethod -Params $detailParams
-                if ($detailResp.success -and $detailResp.data) {
-                $tableSection = $detailResp.data.details | ForEach-Object { $_.subsections } |
-                    Where-Object { $_.type -eq "table" -and $_.fieldValues } |
-                    Select-Object -First 1
+        # Try each matched entry until we get driver/fw combos (handles branded cards with no driver data)
+        $candidateEntries = @($bestEntry)
+        $otherEntries = $matched | Where-Object { $_.uuid -ne $bestEntry.uuid }
+        if ($otherEntries) { $candidateEntries += $otherEntries }
 
-                        if ($tableSection) {
-                    $rows = $tableSection.fieldValues
-                    # Filter to only the installed driver if known
-                    if ($InstalledDriver -and $InstalledDriver -ne "N/A") {
-                        $filtered = $rows | Where-Object { $_.driverName -eq $InstalledDriver }
-                        if ($filtered) { $rows = $filtered }
-                    }
-                    $driverFirmwareCombos = $rows | ForEach-Object {
-                        $fwVer   = if ($_.firmwareVersion)           { $_.firmwareVersion }           else { "N/A" }
-                        $addlFw  = if ($_.additionalFirmwareVersion) { $_.additionalFirmwareVersion } else { "" }
-                        [PSCustomObject]@{
-                            Release                   = $_.release
-                            DriverName                = $_.driverName
-                            DriverVersion             = $_.driverVersion
-                            FirmwareVersion           = $fwVer
-                            AdditionalFirmwareVersion = $addlFw
-                            Type                      = $_.type
+        foreach ($candidate in $candidateEntries) {
+            if ($driverFirmwareCombos.Count -gt 0) { break }
+            $detailParams.Uri = "https://compatibilityguide.broadcom.com/compguide/programs/viewDetails?programId=$Program&id=$($candidate.uuid)&filterBy=$releaseFilter"
+            try {
+                $detailResp = Invoke-BCGRestMethod -Params $detailParams
+                if ($detailResp.success -and $detailResp.data) {
+                    $tableSection = $detailResp.data.details | ForEach-Object { $_.subsections } |
+                        Where-Object { $_.type -eq "table" -and $_.fieldValues } |
+                        Select-Object -First 1
+
+                    if ($tableSection) {
+                        $rows = $tableSection.fieldValues
+                        # Filter to installed driver name if known
+                        if ($InstalledDriver -and $InstalledDriver -ne "N/A") {
+                            $filtered = $rows | Where-Object { $_.driverName -eq $InstalledDriver }
+                            if ($filtered) { $rows = $filtered }
+                        }
+                        $driverFirmwareCombos = $rows | ForEach-Object {
+                            $fwVer  = if ($_.firmwareVersion)           { $_.firmwareVersion }           else { "N/A" }
+                            $addlFw = if ($_.additionalFirmwareVersion) { $_.additionalFirmwareVersion } else { "" }
+                            [PSCustomObject]@{
+                                Release                   = $_.release
+                                DriverName                = $_.driverName
+                                DriverVersion             = $_.driverVersion
+                                FirmwareVersion           = $fwVer
+                                AdditionalFirmwareVersion = $addlFw
+                                Type                      = $_.type
+                            }
                         }
                     }
                 }
+            } catch {
+                Write-Verbose "  [BCG] Detail API error for uuid $($candidate.uuid): $_"
             }
-        } catch {
-            }
+        }
     }
 
     return [PSCustomObject]@{
