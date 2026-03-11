@@ -315,7 +315,8 @@ html = f"""<!DOCTYPE html>
   .stat-card .label {{ font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-bottom: 6px; font-family: 'IBM Plex Mono', monospace; }}
   .stat-card .value {{ font-size: 32px; font-weight: 600; font-family: 'IBM Plex Mono', monospace; }}
   .stat-card.s-pass .value {{ color: var(--pass); }} .stat-card.s-fail .value {{ color: var(--fail); }} .stat-card.s-warn .value {{ color: var(--warn); }} .stat-card.s-total .value {{ color: var(--accent); }}
-  table {{ width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }}
+  table {{ width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }}
+  table tbody {{ border-radius: 8px; }}
   thead th {{ background: #1c2128; font-family: 'IBM Plex Mono', monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--border); }}
   td {{ padding: 11px 16px; border-bottom: 1px solid var(--border); vertical-align: middle; }}
   tr:last-child td {{ border-bottom: none; }}
