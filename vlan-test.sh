@@ -13,14 +13,6 @@ export GOVC_INSECURE=1
 
 # --- VM Config ---
 VM_NAME="ubuntu-probe"        # exact VM name as shown in vCenter
-MGMT_IFACE="ens160"           # management NIC - never touched during tests
-MGMT_MODE="dhcp"              # "dhcp" or "static"
-
-# Only used when MGMT_MODE="static":
-MGMT_STATIC_IP="10.0.0.50/24"
-MGMT_STATIC_GW="10.0.0.1"
-MGMT_STATIC_DNS="8.8.8.8"
-
 IFACE="ens192"                # test NIC - rotated between VLANs by the script
 
 # --- DNS test settings ---
@@ -83,37 +75,6 @@ print(json.dumps(data))
 }
 
 # ============================================================
-#  Management NIC setup
-# ============================================================
-setup_mgmt_nic() {
-  log "Configuring management NIC ($MGMT_IFACE) — mode: $MGMT_MODE..."
-
-  if [ "$MGMT_MODE" = "static" ]; then
-    sudo ip link set "$MGMT_IFACE" up
-    sudo ip addr flush dev "$MGMT_IFACE"
-    sudo ip addr add "$MGMT_STATIC_IP" dev "$MGMT_IFACE"
-    sudo ip route add default via "$MGMT_STATIC_GW" 2>/dev/null || true
-    pass "Management NIC configured: $MGMT_STATIC_IP via $MGMT_STATIC_GW"
-
-  elif [ "$MGMT_MODE" = "dhcp" ]; then
-    sudo ip link set "$MGMT_IFACE" up
-    sudo dhclient -r "$MGMT_IFACE" 2>/dev/null
-    sudo dhclient "$MGMT_IFACE" 2>/dev/null
-    MGMT_ADDR=$(ip addr show "$MGMT_IFACE" | grep 'inet ' | awk '{print $2}')
-    if [ -n "$MGMT_ADDR" ]; then
-      pass "Management NIC got DHCP lease: $MGMT_ADDR"
-    else
-      echo "ERROR: Management NIC did not get a DHCP lease."
-      exit 1
-    fi
-
-  else
-    echo "ERROR: MGMT_MODE must be 'dhcp' or 'static'. Got: $MGMT_MODE"
-    exit 1
-  fi
-}
-
-# ============================================================
 #  Pre-flight checks
 # ============================================================
 log "Pre-flight: checking govc..."
@@ -131,16 +92,12 @@ fi
 log "Pre-flight: installing test tools if needed..."
 which nmap &>/dev/null || sudo apt-get install -y nmap dnsutils curl &>/dev/null
 
-log "Pre-flight: setting up management NIC..."
-setup_mgmt_nic
-
 echo ""
 echo "╔══════════════════════════════════════════╗"
 echo "║        vSphere VLAN Probe Tester         ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 echo "  VM      : $VM_NAME"
-echo "  Mgmt NIC: $MGMT_IFACE ($MGMT_MODE)"
 echo "  Test NIC: $IFACE"
 echo ""
 
