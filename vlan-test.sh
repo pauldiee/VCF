@@ -1,8 +1,40 @@
 #!/bin/bash
 # ============================================================
 #  vSphere VLAN Probe Tester
-#  Runs locally on the Ubuntu probe VM.
-#  Requires: govc installed on this VM, sudo without password.
+#
+#  Description:
+#    Automates end-to-end VLAN validation on a VMware vSphere
+#    environment. Runs locally on the Ubuntu probe VM, uses
+#    govc to rotate the test NIC between port groups, then
+#    runs a battery of network tests (ping, DNS, HTTP, port
+#    scan, MTU) for each VLAN. Produces a JSON result file
+#    and an interactive HTML report.
+#
+#  Author : Paul van Dieen
+#  Site   : https://www.hollebollevsan.nl
+#
+#  Requirements:
+#    - govc installed on this VM and in PATH
+#      Install: curl -L https://github.com/vmware/govmomi/releases/latest/download/govc_Linux_x86_64.tar.gz | tar -xz && sudo mv govc /usr/local/bin/
+#    - sudo without password prompt
+#    - nmap, dnsutils, curl (auto-installed if missing)
+#
+#  Usage:
+#    chmod +x vlan-test.sh
+#    ./vlan-test.sh
+#
+#  Changelog:
+#    v1.0              Initial release — basic port group switch + ping test
+#    v1.1              Added richer test battery: DNS, HTTP, port scan, MTU
+#    v1.2              Added HTML report with interactive expand/collapse
+#                      and JSON output
+#    v1.3              Added management NIC static/DHCP mode support
+#    v1.4              Moved execution to run locally on probe VM,
+#                      removed SSH dependency
+#    v1.5              Removed management NIC setup — user preconfigures it
+#    v1.6              Fixed HTML report row expand (overflow:hidden on table)
+#    v1.7              Fixed MTU test result label (large -> 1400-byte)
+#    v1.8  2026-03-11  Added script header with author, site, changelog
 # ============================================================
 
 # --- vCenter Config ---
