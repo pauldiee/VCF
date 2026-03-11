@@ -139,8 +139,10 @@ for i in "${!VLANS[@]}"; do
   sudo ip link set "$IFACE" up
   sudo ip addr flush dev "$IFACE"
   sudo ip addr add "$IP" dev "$IFACE"
-  sudo ip route flush default 2>/dev/null
-  sudo ip route add default via "$GW"
+  # Remove only routes scoped to this interface — never touch the global default
+  sudo ip route flush dev "$IFACE" 2>/dev/null || true
+  # Add a host route to the gateway so it is reachable via the test NIC
+  sudo ip route add "$GW" dev "$IFACE" 2>/dev/null || true
 
   ASSIGNED=$(ip addr show "$IFACE" | grep 'inet ' | awk '{print $2}')
   if [ "$ASSIGNED" = "$IP" ]; then
