@@ -823,7 +823,7 @@ function Invoke-BCGQuery {
                             $filtered = @($rows | Where-Object { $_.driverName -eq $InstalledDriver })
                             if ($filtered.Count -gt 0) { $rows = $filtered }
                         }
-                        $driverFirmwareCombos = $rows | ForEach-Object {
+                        $driverFirmwareCombos = @($rows | ForEach-Object {
                             $fwVer  = if ($_.firmwareVersion)           { $_.firmwareVersion }           else { "N/A" }
                             $addlFw = if ($_.additionalFirmwareVersion) { $_.additionalFirmwareVersion } else { "" }
                             [PSCustomObject]@{
@@ -834,7 +834,7 @@ function Invoke-BCGQuery {
                                 AdditionalFirmwareVersion = $addlFw
                                 Type                      = $_.type
                             }
-                        }
+                        })
                     }
                 }
             } catch {
@@ -997,7 +997,7 @@ if ($TargetESXiVersion -ne "") {
             HCL_DriverFWCombos = $dfCsv
             HCL_URL            = $row.HCL_URL
             # Keep full combos object for HTML (not exported to CSV)
-            _DriverFirmwareCombos = $cached.DriverFirmwareCombos
+            _DriverFirmwareCombos = @($cached.DriverFirmwareCombos)
         })
     }
 
