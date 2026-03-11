@@ -817,11 +817,11 @@ function Invoke-BCGQuery {
                         Select-Object -First 1
 
                     if ($tableSection) {
-                        $rows = $tableSection.fieldValues
+                        $rows = @($tableSection.fieldValues)
                         # Filter to installed driver name if known
                         if ($InstalledDriver -and $InstalledDriver -ne "N/A") {
-                            $filtered = $rows | Where-Object { $_.driverName -eq $InstalledDriver }
-                            if ($filtered) { $rows = $filtered }
+                            $filtered = @($rows | Where-Object { $_.driverName -eq $InstalledDriver })
+                            if ($filtered.Count -gt 0) { $rows = $filtered }
                         }
                         $driverFirmwareCombos = $rows | ForEach-Object {
                             $fwVer  = if ($_.firmwareVersion)           { $_.firmwareVersion }           else { "N/A" }
