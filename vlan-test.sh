@@ -351,9 +351,10 @@ html = f"""<!DOCTYPE html>
 <script>
 function toggleGroup(header) {{
   const pg = header.getAttribute('data-pg');
-  const rows = document.querySelectorAll('[data-group="' + pg.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"]');
   const nameCell = header.querySelector('.pg-name');
-  const visible = rows[0] && rows[0].style.display !== 'none';
+  const allRows = Array.from(document.querySelectorAll('.test-row'));
+  const rows = allRows.filter(r => r.getAttribute('data-group') === pg);
+  const visible = rows.length > 0 && rows[0].style.display !== 'none';
   rows.forEach(r => r.style.display = visible ? 'none' : 'table-row');
   if (nameCell) nameCell.textContent = (visible ? '▶ ' : '▼ ') + pg;
 }}
