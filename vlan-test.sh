@@ -229,7 +229,7 @@ for i in "${!VLANS[@]}"; do
   MTU_OUT=$(ping -c 2 -W 2 -M do -s 1400 "$GW" 2>&1)
   if echo "$MTU_OUT" | grep -q "2 received\|1 received"; then
     pass "MTU 1400 OK"
-    append_result "$PG" "$DESC" "MTU Test (1400)" "$PASS" "Large frames passing"
+    append_result "$PG" "$DESC" "MTU Test (1400)" "$PASS" "1400-byte frames passing"
   else
     fail "MTU test failed (fragmentation or packet loss)"
     append_result "$PG" "$DESC" "MTU Test (1400)" "$WARN" "1400-byte frames dropped — possible MTU mismatch"
