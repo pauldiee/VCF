@@ -34,13 +34,15 @@
 #    v1.5              Removed management NIC setup — user preconfigures it
 #    v1.6              Fixed HTML report row expand (overflow:hidden on table)
 #    v1.7              Fixed MTU test result label (large -> 1400-byte)
-#    v1.8  2026-03-11  Added script header with author, site, changelog
+#    v1.8              Added script header with author, site, changelog
+#    v1.9  2026-03-13  Added TCP reachability, ICMP vs TCP comparison,
+#                      UDP test (DNS/UDP 53) and latency baseline
 # ============================================================
 
 # --- vCenter Config ---
 export GOVC_URL="https://vcenter.lab.local"
 export GOVC_USERNAME="administrator@vsphere.local"
-export GOVC_PASSWORD="yourpassword"
+export GOVC_PASSWORD='yourpassword'  # single quotes required — prevents bash interpreting ! and $ in passwords
 export GOVC_INSECURE=1
 
 # --- VM Config ---
@@ -265,6 +267,70 @@ for i in "${!VLANS[@]}"; do
   else
     fail "MTU test failed (fragmentation or packet loss)"
     append_result "$PG" "$DESC" "MTU Test (1400)" "$WARN" "1400-byte frames dropped — possible MTU mismatch"
+  fi
+
+  # 9. ICMP vs TCP reachability
+  # If ICMP ping failed, try TCP on port 80 and 443 as fallback
+  log "TCP reachability check (ports 80, 443)..."
+  TCP_RESULT=""
+  for PORT in 80 443; do
+    TCP_OUT=$(nc -zw3 "$GW" "$PORT" 2>&1; echo $?)
+    if [ "$(echo "$TCP_OUT" | tail -1)" = "0" ]; then
+      TCP_RESULT="port $PORT open"
+      break
+    fi
+  done
+  if [ -n "$TCP_RESULT" ]; then
+    pass "TCP reachable via $TCP_RESULT"
+    append_result "$PG" "$DESC" "TCP Reachability" "$PASS" "Gateway reachable via TCP $TCP_RESULT"
+    # Flag if ICMP was blocked but TCP works
+    if [ "$PING_LOSS" = "100" ]; then
+      fail "ICMP blocked but TCP works — gateway filters ICMP"
+      append_result "$PG" "$DESC" "ICMP vs TCP" "$WARN" "ICMP blocked, TCP open — gateway may filter ICMP"
+    fi
+  else
+    fail "TCP ports 80 and 443 both unreachable on $GW"
+    append_result "$PG" "$DESC" "TCP Reachability" "$FAIL" "No response on TCP 80 or 443"
+  fi
+
+  # 10. UDP test (DNS over UDP port 53)
+  log "UDP reachability test (DNS/UDP port 53 via $DNS_SERVER)..."
+  UDP_OUT=$(dig @"$DNS_SERVER" "$DNS_HOSTNAME" +notcp +time=3 +tries=2 2>&1)
+  UDP_RTT=$(echo "$UDP_OUT" | grep -oP 'Query time: \K\d+')
+  if echo "$UDP_OUT" | grep -q "NOERROR"; then
+    pass "UDP reachable — DNS/UDP responded in ${UDP_RTT}ms"
+    append_result "$PG" "$DESC" "UDP Test (DNS/53)" "$PASS" "UDP DNS response in ${UDP_RTT}ms"
+  elif echo "$UDP_OUT" | grep -q "timed out\|no servers"; then
+    fail "UDP unreachable — DNS/UDP port 53 timed out"
+    append_result "$PG" "$DESC" "UDP Test (DNS/53)" "$FAIL" "UDP DNS timed out — UDP may be blocked"
+  else
+    fail "UDP test inconclusive: $UDP_OUT"
+    append_result "$PG" "$DESC" "UDP Test (DNS/53)" "$WARN" "Unexpected response: $UDP_OUT"
+  fi
+
+  # 11. Latency baseline — 10 pings, record min/avg/max, warn if avg > threshold
+  LATENCY_WARN_MS=50   # adjust to suit your environment
+  log "Latency baseline (10 pings to $GW)..."
+  LAT_OUT=$(ping -c 10 -W 2 -i 0.2 "$GW" 2>&1)
+  LAT_STATS=$(echo "$LAT_OUT" | grep -oP 'rtt.*= \K[\d.]+/[\d.]+/[\d.]+')
+  if [ -n "$LAT_STATS" ]; then
+    LAT_MIN=$(echo "$LAT_STATS" | cut -d'/' -f1)
+    LAT_AVG=$(echo "$LAT_STATS" | cut -d'/' -f2)
+    LAT_MAX=$(echo "$LAT_STATS" | cut -d'/' -f3)
+    LAT_LOSS=$(echo "$LAT_OUT" | grep -oP '\d+(?=% packet loss)')
+    LAT_DETAIL="min=${LAT_MIN}ms avg=${LAT_AVG}ms max=${LAT_MAX}ms loss=${LAT_LOSS}%"
+    # Compare avg to threshold using awk for float comparison
+    OVER_THRESHOLD=$(awk "BEGIN { print ($LAT_AVG > $LATENCY_WARN_MS) ? 1 : 0 }")
+    if [ "$OVER_THRESHOLD" = "1" ]; then
+      fail "High latency: avg ${LAT_AVG}ms exceeds ${LATENCY_WARN_MS}ms threshold"
+      append_result "$PG" "$DESC" "Latency Baseline" "$WARN" "$LAT_DETAIL — avg exceeds ${LATENCY_WARN_MS}ms threshold"
+    else
+      pass "Latency OK: $LAT_DETAIL"
+      append_result "$PG" "$DESC" "Latency Baseline" "$PASS" "$LAT_DETAIL"
+    fi
+  else
+    fail "Latency baseline failed — no ping response"
+    append_result "$PG" "$DESC" "Latency Baseline" "$FAIL" "No response from $GW"
   fi
 
   echo ""
