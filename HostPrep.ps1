@@ -1,9 +1,9 @@
-<#
+﻿<#
 .SYNOPSIS
     Prepares ESXi hosts for commissioning into SDDC Manager / VCF 9.
 
 .DESCRIPTION
-    When run, the script will interactively prompt for all required input —
+    When run, the script will interactively prompt for all required input  -- 
     no pre-configuration needed. The following steps are performed for each host:
 
       1. Connect to the ESXi host using the root account
@@ -28,7 +28,7 @@
 
       - Config.HostAgent.plugins.hostsvc.esxAdminsGroup
           The Active Directory group whose members receive full admin access.
-          Default value: "ESX Admins" — change to match your AD group name.
+          Default value: "ESX Admins"  --  change to match your AD group name.
 
       - LSOM.lsomEnableRebuildOnLSE
           Enables vSAN automatic rebuild when a device is flagged as LSE.
@@ -48,7 +48,7 @@
 
     Lines starting with # are treated as comments and ignored.
     Blank lines are also ignored.
-    The path can be typed or pasted — surrounding quotes are stripped automatically.
+    The path can be typed or pasted  --  surrounding quotes are stripped automatically.
 
     Prerequisites
     -------------
@@ -95,7 +95,7 @@
 
 .PARAMETER WhatIfReport
     Connects to each host, reads the current certificate CN and SHA-256
-    thumbprint, and generates the HTML report — without making any other
+    thumbprint, and generates the HTML report  --  without making any other
     changes. Useful for a pre-commissioning inventory pass to collect
     thumbprints before running the full script. Credentials are still
     required to connect.
@@ -231,11 +231,11 @@ $ScriptMeta = @{
 # Settings with Enabled = $false are silently skipped.
 # Value types: strings must be quoted ("like this"), integers unquoted (1 or 0),
 # booleans as $true/$false. Using the wrong type will be silently accepted by
-# Set-AdvancedSetting but may have no effect — check the type note per setting.
+# Set-AdvancedSetting but may have no effect  --  check the type note per setting.
 #
 $OptionalAdvancedSettings = @(
 
-    # ESX Admins group — the Active Directory group whose members are granted
+    # ESX Admins group  --  the Active Directory group whose members are granted
     # full administrative access to the ESXi host. Change the value to match
     # your AD group name before enabling.
     # Value type: string
@@ -248,7 +248,7 @@ $OptionalAdvancedSettings = @(
         Label   = "ESX Admins group"
     },
 
-    # vSAN rebuild on Latency Sensitive Equipment (LSE) — controls whether
+    # vSAN rebuild on Latency Sensitive Equipment (LSE)  --  controls whether
     # vSAN triggers an automatic rebuild when a device is marked as LSE.
     # Value type: integer (1 = enabled, 0 = disabled)
     @{
@@ -258,7 +258,7 @@ $OptionalAdvancedSettings = @(
         Label   = "vSAN rebuild on LSE"
     },
 
-    # SSD TRIM support — instructs ESXi to issue TRIM/UNMAP commands to
+    # SSD TRIM support  --  instructs ESXi to issue TRIM/UNMAP commands to
     # compatible SSDs, allowing the drive firmware to reclaim freed blocks.
     # Value type: integer (1 = enabled, 0 = disabled)
     @{
@@ -314,7 +314,7 @@ if ($WhatIfReport) {
 Start-Transcript -Path $LogPath -Append
 Write-Host "HostPrep started at $(Get-Date)" -ForegroundColor Cyan
 
-# Verify optional modules (Posh-SSH needed for cert regen — not relevant in WhatIfReport mode)
+# Verify optional modules (Posh-SSH needed for cert regen  --  not relevant in WhatIfReport mode)
 $script:PoshSSHAvailable = $false
 if (-not $WhatIfReport) {
     if (-not (Get-Module -ListAvailable -Name "Posh-SSH")) {
@@ -610,7 +610,7 @@ function Wait-ESXiHostOnline {
             }
             $tcp.Close()
         } catch {
-            # Connection refused or timed out — host still rebooting
+            # Connection refused or timed out  --  host still rebooting
         }
         Write-Host "  Still waiting... ($(
             [int]($deadline - (Get-Date)).TotalSeconds)s remaining)" -ForegroundColor DarkGray
@@ -874,7 +874,7 @@ function Write-HtmlReport {
                 if     ($row.Rebooted -eq 'OK')      { 'Yes' }
                 elseif ($row.Rebooted -eq 'Skipped') { 'Not needed' }
                 elseif ($row.Rebooted -eq 'Manual')  { 'Manual required' }
-                elseif ($row.Rebooted -eq 'Timeout') { '<span class="expiry-critical">Timeout — check host console</span>' }
+                elseif ($row.Rebooted -eq 'Timeout') { '<span class="expiry-critical">Timeout  --  check host console</span>' }
                 else                                 { [System.Web.HttpUtility]::HtmlEncode($row.Rebooted) }
             )</td>
             <td>$(if ($row.NTP -eq 'OK') { 'OK' } else { [System.Web.HttpUtility]::HtmlEncode($row.NTP) })</td>
@@ -1016,7 +1016,7 @@ $esxiPassword    = Read-Host "Enter the 'root' password used to connect to the E
 $esxiCredentials = New-Object System.Management.Automation.PSCredential("root", $esxiPassword)
 
 # Ask interactively whether to reset the root account password
-# (not applicable in WhatIfReport mode — no changes are made)
+# (not applicable in WhatIfReport mode  --  no changes are made)
 Write-Host ""
 if ($WhatIfReport) {
     $ResetPassword = $false
@@ -1187,7 +1187,7 @@ foreach ($esxiHost in $targetEsxiHosts) {
             Write-Host "  Thumbprint : $($certCheck.Thumbprint)" -ForegroundColor DarkGray
             Write-Host "  CN         : $($certCheck.CN)"         -ForegroundColor DarkGray
             Write-Host "  Expiry     : $($certCheck.Expiry)"     -ForegroundColor DarkGray
-            # Skip all remaining steps — fall through to finally for clean disconnect
+            # Skip all remaining steps  --  fall through to finally for clean disconnect
         } else {
 
         # --- NTP ---
@@ -1369,8 +1369,8 @@ foreach ($esxiHost in $targetEsxiHosts) {
     } finally {
         if ($hostResult.Connected -and -not $DryRun) {
             if ($script:hostTimedOut) {
-                # Host never came back — skip disconnect, it will just throw a noisy error
-                Write-Host "`n  Host is unreachable — skipping disconnect." -ForegroundColor DarkGray
+                # Host never came back  --  skip disconnect, it will just throw a noisy error
+                Write-Host "`n  Host is unreachable  --  skipping disconnect." -ForegroundColor DarkGray
             } else {
                 Disconnect-VIServer -Server $esxiHost -Confirm:$false -ErrorAction SilentlyContinue
                 Write-Host "`n  Disconnected from $esxiHost." -ForegroundColor Gray
