@@ -114,7 +114,7 @@
 
 .NOTES
     Script  : HostPrep.ps1
-    Version : 3.2.0
+    Version : 3.3.1
     Author  : Paul van Dieen
     Blog    : https://www.hollebollevsan.nl
     Date    : 2026-03-09
@@ -176,7 +176,16 @@
                 added -WhatIfReport switch; HTML report gains clipboard copy
                 button, cert expiry column with amber/red highlighting, and
                 Optional Settings column; Expiry stored in $hostResult
-        3.2.0 - Fixed $summaryWidth undefined (derived from column widths);
+        3.3.1 - Fixed thumbprint format: was colon-separated hex (XX:XX:...),
+                now SHA256:<base64> to match the SDDC Manager commissioning
+                UI exactly; updated HTML report header, column label, and
+                note text accordingly and surfaces a
+                clear error in $hostResult.Error instead of polluting
+                CertRegen with the exception message; a prominent red
+                banner is printed immediately on timeout; finally block
+                skips Disconnect-VIServer when host never came back to
+                avoid the noisy ObjectNotFound error; Timeout added to
+                Get-CellColor (red), HTML report Rebooted cell, and legend
                 WhatIfReport overallOk logic corrected (NTP/AdvancedSettings
                 are Skipped so status now shows correct checkmark); CertRegen
                 'OK' in WhatIfReport now shows 'Not needed' not 'Regenerated';
@@ -208,7 +217,7 @@ param (
 
 $ScriptMeta = @{
     Name    = "HostPrep.ps1"
-    Version = "3.2.0"
+    Version = "3.3.1"
     Author  = "Paul van Dieen"
     Blog    = "https://www.hollebollevsan.nl"
     Date    = "2026-03-09"
@@ -456,17 +465,18 @@ function Test-ESXiCertificateNeedsRegen {
         $cnMatch = $cert.Subject -match 'CN=([^,]+)'
         $cn      = if ($cnMatch) { $Matches[1].Trim() } else { "" }
 
-        # Compute SHA-256 thumbprint formatted with colons (as SDDC Manager expects)
-        $sha256      = [System.Security.Cryptography.SHA256]::Create()
-        $hashBytes   = $sha256.ComputeHash($cert.RawData)
-        $thumbprint  = ($hashBytes | ForEach-Object { $_.ToString("X2") }) -join ":"
+        # Compute SHA-256 thumbprint in the format SDDC Manager expects:
+        # "SHA256:" followed by the base64-encoded hash (no padding, URL-safe not required)
+        $sha256     = [System.Security.Cryptography.SHA256]::Create()
+        $hashBytes  = $sha256.ComputeHash($cert.RawData)
+        $thumbprint = "SHA256:" + [System.Convert]::ToBase64String($hashBytes)
 
         $expiry = $cert.NotAfter.ToString("yyyy-MM-dd HH:mm:ss")
 
         Write-Host "  Certificate CN  : $cn" -ForegroundColor DarkGray
         Write-Host "  Host FQDN       : $VMHost" -ForegroundColor DarkGray
         Write-Host "  Expires         : $expiry" -ForegroundColor DarkGray
-        Write-Host "  SHA-256         : $thumbprint" -ForegroundColor DarkGray
+        Write-Host "  SHA256:base64   : $thumbprint" -ForegroundColor DarkGray
 
         $needsRegen = $cn -ne $VMHost
         if ($needsRegen) {
@@ -859,6 +869,8 @@ $results = [System.Collections.Generic.List[PSCustomObject]]::new()
 
 foreach ($esxiHost in $targetEsxiHosts) {
 
+    $script:hostTimedOut = $false
+
     Write-Host ("`n" + ("=" * 60)) -ForegroundColor Cyan
     Write-Host "Processing host: $esxiHost" -ForegroundColor Cyan
     Write-Host ("=" * 60) -ForegroundColor Cyan
@@ -1020,7 +1032,6 @@ foreach ($esxiHost in $targetEsxiHosts) {
                         # Wait for the host to come back (throws on timeout)
                         Wait-ESXiHostOnline -VMHost $esxiHost
                         $hostResult.Rebooted = "OK"
-
                         # Reconnect for remaining steps (password reset)
                         Write-Host "  Reconnecting to $esxiHost..." -ForegroundColor Cyan
                         Connect-VIServer -Server $esxiHost -Credential $esxiCredentials -ErrorAction Stop | Out-Null
@@ -1036,8 +1047,22 @@ foreach ($esxiHost in $targetEsxiHosts) {
                 }
             }
         } catch {
-            $hostResult.CertRegen = "FAILED: $_"
-            Write-Warning "  Certificate regeneration/reboot failed: $_"
+            # Distinguish a reboot timeout from other cert regen failures
+            if ($_ -match "Timed out waiting") {
+                $hostResult.CertRegen = "OK"       # regen itself succeeded
+                $hostResult.Rebooted  = "Timeout"  # host never came back
+                $hostResult.Error     = "Host did not come back online after reboot within the timeout period. Check the host console for hardware or boot errors."
+                $script:hostTimedOut  = $true
+                Write-Host ""
+                Write-Host ("  " + ("!" * 58)) -ForegroundColor Red
+                Write-Host "  !! REBOOT TIMEOUT: $esxiHost did not come back online !!" -ForegroundColor Red
+                Write-Host "  !! Check the host console for hardware or boot errors. !!" -ForegroundColor Red
+                Write-Host ("  " + ("!" * 58)) -ForegroundColor Red
+                Write-Host ""
+            } else {
+                $hostResult.CertRegen = "FAILED: $_"
+                Write-Warning "  Certificate regeneration/reboot failed: $_"
+            }
         }
 
         # --- Password Reset (always last) ---
@@ -1067,8 +1092,13 @@ foreach ($esxiHost in $targetEsxiHosts) {
         Write-Warning "  Failed to process host '$esxiHost': $_"
     } finally {
         if ($hostResult.Connected -and -not $DryRun) {
-            Disconnect-VIServer -Server $esxiHost -Confirm:$false -ErrorAction SilentlyContinue
-            Write-Host "`n  Disconnected from $esxiHost." -ForegroundColor Gray
+            if ($script:hostTimedOut) {
+                # Host never came back — skip disconnect, it will just throw a noisy error
+                Write-Host "`n  Host is unreachable — skipping disconnect." -ForegroundColor DarkGray
+            } else {
+                Disconnect-VIServer -Server $esxiHost -Confirm:$false -ErrorAction SilentlyContinue
+                Write-Host "`n  Disconnected from $esxiHost." -ForegroundColor Gray
+            }
         } elseif ($DryRun) {
             Write-Host "`n  [DRY RUN] Would disconnect from $esxiHost." -ForegroundColor DarkYellow
         }
@@ -1112,6 +1142,7 @@ function Write-ColorSummaryTable {
         if ($value -eq "Skipped")                          { return "DarkGray" }
         if ($value -eq "Manual")                           { return "Yellow"   }
         if ($value -eq "Partial")                          { return "Yellow"   }
+        if ($value -eq "Timeout")                          { return "Red"      }
         if ($value -like "Unexpected*")                    { return "Yellow"   }
         return "White"
     }
@@ -1224,7 +1255,13 @@ function Write-HtmlReport {
                 elseif ($row.CertRegen -eq 'Regen needed')          { '<span class=expiry-warn>Regen needed</span>' }
                 else                                                 { [System.Web.HttpUtility]::HtmlEncode($row.CertRegen) }
             )</td>
-            <td>$(if ($row.Rebooted -eq 'OK') { 'Yes' } elseif ($row.Rebooted -eq 'Skipped') { 'Not needed' } elseif ($row.Rebooted -eq 'Manual') { 'Manual required' } else { [System.Web.HttpUtility]::HtmlEncode($row.Rebooted) })</td>
+            <td>$(
+                if     ($row.Rebooted -eq 'OK')      { 'Yes' }
+                elseif ($row.Rebooted -eq 'Skipped') { 'Not needed' }
+                elseif ($row.Rebooted -eq 'Manual')  { 'Manual required' }
+                elseif ($row.Rebooted -eq 'Timeout') { '<span class="expiry-critical">Timeout — check host console</span>' }
+                else                                 { [System.Web.HttpUtility]::HtmlEncode($row.Rebooted) }
+            )</td>
             <td>$(if ($row.NTP -eq 'OK') { 'OK' } else { [System.Web.HttpUtility]::HtmlEncode($row.NTP) })</td>
             <td>$(if ($row.AdvancedSettings -eq 'OK') { 'OK' } else { [System.Web.HttpUtility]::HtmlEncode($row.AdvancedSettings) })</td>
             <td>$(if ($row.OptionalSettings -eq 'OK') { 'OK' } elseif ($row.OptionalSettings -eq 'Skipped') { '<span style=color:#6e7681>Skipped</span>' } elseif ($row.OptionalSettings -eq 'Partial') { '<span class=expiry-warn>Partial</span>' } else { [System.Web.HttpUtility]::HtmlEncode($row.OptionalSettings) })</td>
@@ -1297,8 +1334,8 @@ function Write-HtmlReport {
     <div class="value" style="color:#f85149">$failCount</div>
   </div>
   <div class="meta-item">
-    <div class="label">Thumbprint algorithm</div>
-    <div class="value">SHA-256</div>
+    <div class="label">Thumbprint format</div>
+    <div class="value">SHA256:base64</div>
   </div>
 </div>
 
@@ -1306,7 +1343,7 @@ function Write-HtmlReport {
   <thead>
     <tr>
       <th>Host FQDN</th>
-      <th>SSL Thumbprint (SHA-256)</th>
+      <th>SSL Thumbprint (SHA256:base64)</th>
       <th>Cert Expiry</th>
       <th>Cert Regen</th>
       <th>Rebooted</th>
@@ -1323,8 +1360,8 @@ function Write-HtmlReport {
 </table>
 
 <div class="note">
-  <strong>Note:</strong> The SSL thumbprint shown is the SHA-256 fingerprint of the certificate
-  present on each host at the time this script ran. Use these values to verify host identity
+  <strong>Note:</strong> The SSL thumbprint shown is in the <code>SHA256:&lt;base64&gt;</code> format
+  as expected by the SDDC Manager commissioning UI. Use these values to verify host identity
   when adding hosts to SDDC Manager during VCF commissioning.
   Thumbprints for hosts where certificate regeneration was performed reflect the <em>new</em> certificate.
   Expiry dates within 90 days are shown in <span class="expiry-warn">amber</span>;
@@ -1368,6 +1405,7 @@ Write-Host ""
 Write-Host "  Legend: " -NoNewline -ForegroundColor White
 Write-Host "OK  "      -NoNewline -ForegroundColor Green
 Write-Host "FAILED  "  -NoNewline -ForegroundColor Red
+Write-Host "Timeout  " -NoNewline -ForegroundColor Red
 Write-Host "Skipped  " -NoNewline -ForegroundColor DarkGray
 Write-Host "Manual  "  -NoNewline -ForegroundColor Yellow
 Write-Host "Partial  " -NoNewline -ForegroundColor Yellow
