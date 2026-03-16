@@ -742,6 +742,271 @@ function Get-CellColor ($value) {
     return "White"
 }
 
+function Write-ColorSummaryTable {
+    param (
+        [System.Collections.Generic.List[PSCustomObject]]$Data
+    )
+
+    # Column definitions: header label and width
+    $columns = [ordered]@{
+        Host             = 34
+        Connected        = 11
+        NTP              = 6
+        AdvancedSettings = 17
+        OptionalSettings = 17
+        CertRegen        = 10
+        Rebooted         = 10
+        PasswordReset    = 15
+        Error            = 28
+    }
+
+    $divider = "+" + (($columns.Values | ForEach-Object { "-" * ($_ + 2) }) -join "+") + "+"
+
+    Write-Host ""
+    Write-Host $divider -ForegroundColor DarkCyan
+
+    # Header row
+    $headerLine = "|"
+    foreach ($col in $columns.GetEnumerator()) {
+        $headerLine += " {0,-$($col.Value)} |" -f $col.Key
+    }
+    Write-Host $headerLine -ForegroundColor Cyan
+    Write-Host $divider -ForegroundColor DarkCyan
+
+    # Data rows
+    foreach ($row in $Data) {
+        $line = "|"
+        foreach ($col in $columns.GetEnumerator()) {
+            $val   = $row.($col.Key)
+            $display = if ($null -eq $val) { "" } else { "$val" }
+            # Truncate if too wide
+            if ($display.Length -gt $col.Value) { $display = $display.Substring(0, $col.Value - 1) + "~" }
+            $line += " {0,-$($col.Value)} |" -f $display
+        }
+
+        # Determine row base colour from Connected + Error
+        $rowColor = if ($row.Error) { "Red" } elseif ($row.Connected) { "White" } else { "DarkYellow" }
+
+        # Write the row, then rewrite individual cells with colour
+        # PowerShell can't inline per-cell colour in a single Write-Host,
+        # so we print cell by cell
+        Write-Host "|" -ForegroundColor DarkCyan -NoNewline
+        foreach ($col in $columns.GetEnumerator()) {
+            $val     = $row.($col.Key)
+            $display = if ($null -eq $val) { "" } else { "$val" }
+            if ($display.Length -gt $col.Value) { $display = $display.Substring(0, $col.Value - 1) + "~" }
+            $padded  = " {0,-$($col.Value)} " -f $display
+            $color   = Get-CellColor $val
+            if ($color -eq "White") { $color = $rowColor }
+            Write-Host $padded -ForegroundColor $color -NoNewline
+            Write-Host "|" -ForegroundColor DarkCyan -NoNewline
+        }
+        Write-Host ""  # newline
+    }
+
+    Write-Host $divider -ForegroundColor DarkCyan
+}
+
+function Write-HtmlReport {
+    param (
+        [System.Collections.Generic.List[PSCustomObject]]$Data,
+        [string]$ReportPath
+    )
+
+    $totalCount   = [int]$Data.Count
+    $successCount = [int]($Data | Where-Object { (-not $_.Error) -and ($_.Connected -eq $true) } | Measure-Object).Count
+    $failCount    = [int]($Data | Where-Object { $_.Error -or ($_.Connected -ne $true) } | Measure-Object).Count
+
+    $generatedAt = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+
+    # Build table rows
+    $rows = foreach ($row in $Data) {
+        # WhatIfReport: only connected + no error + cert readable counts as success
+        # Normal run: connected + no error + NTP OK + AdvancedSettings OK
+        $overallOk = if ($WhatIfReport) {
+            (-not $row.Error) -and ($row.Connected -eq $true) -and ($row.Thumbprint -ne "N/A")
+        } else {
+            (-not $row.Error) -and
+            ($row.Connected -eq $true) -and
+            ($row.NTP -eq "OK") -and
+            ($row.AdvancedSettings -eq "OK")
+        }
+
+        $rowClass = if ($row.Error) { "fail" } elseif ($overallOk) { "ok" } else { "warn" }
+
+        $thumbCell = if ($row.Thumbprint -eq "N/A") {
+            "<td class='na'>N/A</td>"
+        } else {
+            $encoded = [System.Web.HttpUtility]::HtmlEncode($row.Thumbprint)
+            "<td class='thumbprint'><span class='thumb-text'>$encoded</span><button class='copy-btn' onclick='copyThumb(this)' title='Copy to clipboard'>&#128203;</button></td>"
+        }
+
+        $expiryCell = if ($row.Expiry -eq "N/A") {
+            "<td class='na'>N/A</td>"
+        } else {
+            # Highlight expiry if within 90 days
+            try {
+                $expiryDate = [datetime]::ParseExact($row.Expiry, "yyyy-MM-dd HH:mm:ss", $null)
+                $daysLeft = ($expiryDate - (Get-Date)).Days
+                $expiryClass = if ($daysLeft -lt 30) { "expiry-critical" } elseif ($daysLeft -lt 90) { "expiry-warn" } else { "" }
+                "<td class='$expiryClass'>$([System.Web.HttpUtility]::HtmlEncode($row.Expiry))</td>"
+            } catch {
+                "<td>$([System.Web.HttpUtility]::HtmlEncode($row.Expiry))</td>"
+            }
+        }
+
+        $statusIcon = if ($row.Error) { "&#10008;" } elseif ($overallOk) { "&#10004;" } else { "&#9888;" }
+
+        "
+        <tr class='$rowClass'>
+            <td>$([System.Web.HttpUtility]::HtmlEncode($row.Host))</td>
+            $thumbCell
+            $expiryCell
+            <td>$(
+                if     ($row.CertRegen -eq 'OK' -and $WhatIfReport) { 'Not needed' }
+                elseif ($row.CertRegen -eq 'OK')                    { 'Regenerated' }
+                elseif ($row.CertRegen -eq 'Skipped')               { 'Not needed' }
+                elseif ($row.CertRegen -eq 'Manual')                { 'Manual required' }
+                elseif ($row.CertRegen -eq 'Regen needed')          { '<span class=expiry-warn>Regen needed</span>' }
+                else                                                 { [System.Web.HttpUtility]::HtmlEncode($row.CertRegen) }
+            )</td>
+            <td>$(
+                if     ($row.Rebooted -eq 'OK')      { 'Yes' }
+                elseif ($row.Rebooted -eq 'Skipped') { 'Not needed' }
+                elseif ($row.Rebooted -eq 'Manual')  { 'Manual required' }
+                elseif ($row.Rebooted -eq 'Timeout') { '<span class="expiry-critical">Timeout — check host console</span>' }
+                else                                 { [System.Web.HttpUtility]::HtmlEncode($row.Rebooted) }
+            )</td>
+            <td>$(if ($row.NTP -eq 'OK') { 'OK' } else { [System.Web.HttpUtility]::HtmlEncode($row.NTP) })</td>
+            <td>$(if ($row.AdvancedSettings -eq 'OK') { 'OK' } else { [System.Web.HttpUtility]::HtmlEncode($row.AdvancedSettings) })</td>
+            <td>$(if ($row.OptionalSettings -eq 'OK') { 'OK' } elseif ($row.OptionalSettings -eq 'Skipped') { '<span style=color:#6e7681>Skipped</span>' } elseif ($row.OptionalSettings -eq 'Partial') { '<span class=expiry-warn>Partial</span>' } else { [System.Web.HttpUtility]::HtmlEncode($row.OptionalSettings) })</td>
+            <td>$(if ($row.PasswordReset -eq 'OK') { 'Reset' } elseif ($row.PasswordReset -eq 'Skipped') { 'Not requested' } else { [System.Web.HttpUtility]::HtmlEncode($row.PasswordReset) })</td>
+            <td class='status'>$statusIcon $(if ($row.Error) { [System.Web.HttpUtility]::HtmlEncode($row.Error) } else { '' })</td>
+        </tr>"
+    }
+
+    $html = @"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HostPrep Report</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #0d1117; color: #c9d1d9; padding: 32px; }
+  header { margin-bottom: 28px; border-bottom: 2px solid #1f6feb; padding-bottom: 16px; }
+  header h1 { font-size: 1.6rem; color: #58a6ff; letter-spacing: 0.5px; }
+  header p  { font-size: 0.85rem; color: #8b949e; margin-top: 4px; }
+  .meta { display: flex; gap: 32px; margin-bottom: 24px; flex-wrap: wrap; }
+  .meta-item { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px 20px; }
+  .meta-item .label { font-size: 0.75rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
+  .meta-item .value { font-size: 1.1rem; font-weight: 600; color: #c9d1d9; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; background: #161b22; border-radius: 8px; overflow: hidden; border: 1px solid #30363d; }
+  thead th { background: #1f2937; color: #58a6ff; padding: 10px 14px; text-align: left; font-weight: 600; letter-spacing: 0.4px; white-space: nowrap; border-bottom: 2px solid #1f6feb; }
+  tbody tr { border-bottom: 1px solid #21262d; transition: background 0.15s; }
+  tbody tr:hover { background: #1c2128; }
+  tbody tr:last-child { border-bottom: none; }
+  td { padding: 10px 14px; vertical-align: top; }
+  td.thumbprint { font-family: 'Consolas', 'Courier New', monospace; font-size: 0.72rem; color: #79c0ff; word-break: break-all; max-width: 380px; }
+  .thumb-text { vertical-align: middle; }
+  .copy-btn { margin-left: 8px; background: #21262d; border: 1px solid #30363d; border-radius: 4px; color: #8b949e; cursor: pointer; font-size: 0.75rem; padding: 2px 6px; vertical-align: middle; transition: background 0.15s, color 0.15s; }
+  .copy-btn:hover { background: #1f6feb; color: #fff; border-color: #1f6feb; }
+  .copy-btn.copied { background: #238636; color: #fff; border-color: #238636; }
+  td.na { color: #6e7681; font-style: italic; }
+  td.status { white-space: nowrap; }
+  .expiry-warn     { color: #d29922; }
+  .expiry-critical { color: #f85149; font-weight: 600; }
+  tr.ok  td.status { color: #3fb950; }
+  tr.fail td.status { color: #f85149; }
+  tr.warn td.status { color: #d29922; }
+  tr.ok  td:first-child { border-left: 3px solid #3fb950; }
+  tr.fail td:first-child { border-left: 3px solid #f85149; }
+  tr.warn td:first-child { border-left: 3px solid #d29922; }
+  .note { margin-top: 20px; font-size: 0.8rem; color: #8b949e; background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px 16px; }
+  .note strong { color: #c9d1d9; }
+  footer { margin-top: 28px; font-size: 0.75rem; color: #6e7681; text-align: center; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>&#128196; HostPrep &mdash; VCF Commissioning Report</h1>
+  <p>Generated by HostPrep.ps1 v$($ScriptMeta.Version) &bull; $generatedAt</p>
+</header>
+
+<div class="meta">
+  <div class="meta-item">
+    <div class="label">Hosts processed</div>
+    <div class="value">$totalCount</div>
+  </div>
+  <div class="meta-item">
+    <div class="label">Successful</div>
+    <div class="value" style="color:#3fb950">$successCount</div>
+  </div>
+  <div class="meta-item">
+    <div class="label">Failed</div>
+    <div class="value" style="color:#f85149">$failCount</div>
+  </div>
+  <div class="meta-item">
+    <div class="label">Thumbprint format</div>
+    <div class="value">SHA256:base64</div>
+  </div>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th>Host FQDN</th>
+      <th>SSL Thumbprint (SHA256:base64)</th>
+      <th>Cert Expiry</th>
+      <th>Cert Regen</th>
+      <th>Rebooted</th>
+      <th>NTP</th>
+      <th>Advanced Settings</th>
+      <th>Optional Settings</th>
+      <th>Password Reset</th>
+      <th>Status</th>
+    </tr>
+  </thead>
+  <tbody>
+    $($rows -join "`n")
+  </tbody>
+</table>
+
+<div class="note">
+  <strong>Note:</strong> The SSL thumbprint shown is in the <code>SHA256:&lt;base64&gt;</code> format
+  as expected by the SDDC Manager commissioning UI. Use these values to verify host identity
+  when adding hosts to SDDC Manager during VCF commissioning.
+  Thumbprints for hosts where certificate regeneration was performed reflect the <em>new</em> certificate.
+  Expiry dates within 90 days are shown in <span class="expiry-warn">amber</span>;
+  within 30 days in <span class="expiry-critical">red</span>.
+</div>
+
+<footer>HostPrep.ps1 &bull; $($ScriptMeta.Author) &bull; $($ScriptMeta.Blog)</footer>
+
+<script>
+function copyThumb(btn) {
+    var text = btn.previousElementSibling.textContent.trim();
+    navigator.clipboard.writeText(text).then(function() {
+        btn.textContent = 'Copied!';
+        btn.classList.add('copied');
+        setTimeout(function() {
+            btn.textContent = '\u{1F4CB}';
+            btn.classList.remove('copied');
+        }, 2000);
+    });
+}
+</script>
+
+</body>
+</html>
+"@
+
+    $html | Out-File -FilePath $ReportPath -Encoding UTF8
+    Write-Host ("  HTML report written to: {0}" -f $ReportPath) -ForegroundColor Cyan
+}
+
 #endregion
 #region --- Credential Gathering ---
 
@@ -1125,271 +1390,6 @@ foreach ($esxiHost in $targetEsxiHosts) {
 # Derive summary banner width from column definitions (matches Write-ColorSummaryTable divider)
 $summaryColumnWidths = @(34, 11, 6, 17, 17, 10, 10, 15, 28)
 $summaryWidth = ($summaryColumnWidths | Measure-Object -Sum).Sum + ($summaryColumnWidths.Count * 3) + 1
-
-function Write-ColorSummaryTable {
-    param (
-        [System.Collections.Generic.List[PSCustomObject]]$Data
-    )
-
-    # Column definitions: header label and width
-    $columns = [ordered]@{
-        Host             = 34
-        Connected        = 11
-        NTP              = 6
-        AdvancedSettings = 17
-        OptionalSettings = 17
-        CertRegen        = 10
-        Rebooted         = 10
-        PasswordReset    = 15
-        Error            = 28
-    }
-
-    $divider = "+" + (($columns.Values | ForEach-Object { "-" * ($_ + 2) }) -join "+") + "+"
-
-    Write-Host ""
-    Write-Host $divider -ForegroundColor DarkCyan
-
-    # Header row
-    $headerLine = "|"
-    foreach ($col in $columns.GetEnumerator()) {
-        $headerLine += " {0,-$($col.Value)} |" -f $col.Key
-    }
-    Write-Host $headerLine -ForegroundColor Cyan
-    Write-Host $divider -ForegroundColor DarkCyan
-
-    # Data rows
-    foreach ($row in $Data) {
-        $line = "|"
-        foreach ($col in $columns.GetEnumerator()) {
-            $val   = $row.($col.Key)
-            $display = if ($null -eq $val) { "" } else { "$val" }
-            # Truncate if too wide
-            if ($display.Length -gt $col.Value) { $display = $display.Substring(0, $col.Value - 1) + "~" }
-            $line += " {0,-$($col.Value)} |" -f $display
-        }
-
-        # Determine row base colour from Connected + Error
-        $rowColor = if ($row.Error) { "Red" } elseif ($row.Connected) { "White" } else { "DarkYellow" }
-
-        # Write the row, then rewrite individual cells with colour
-        # PowerShell can't inline per-cell colour in a single Write-Host,
-        # so we print cell by cell
-        Write-Host "|" -ForegroundColor DarkCyan -NoNewline
-        foreach ($col in $columns.GetEnumerator()) {
-            $val     = $row.($col.Key)
-            $display = if ($null -eq $val) { "" } else { "$val" }
-            if ($display.Length -gt $col.Value) { $display = $display.Substring(0, $col.Value - 1) + "~" }
-            $padded  = " {0,-$($col.Value)} " -f $display
-            $color   = Get-CellColor $val
-            if ($color -eq "White") { $color = $rowColor }
-            Write-Host $padded -ForegroundColor $color -NoNewline
-            Write-Host "|" -ForegroundColor DarkCyan -NoNewline
-        }
-        Write-Host ""  # newline
-    }
-
-    Write-Host $divider -ForegroundColor DarkCyan
-}
-
-function Write-HtmlReport {
-    param (
-        [System.Collections.Generic.List[PSCustomObject]]$Data,
-        [string]$ReportPath
-    )
-
-    $totalCount   = [int]$Data.Count
-    $successCount = [int]($Data | Where-Object { (-not $_.Error) -and ($_.Connected -eq $true) } | Measure-Object).Count
-    $failCount    = [int]($Data | Where-Object { $_.Error -or ($_.Connected -ne $true) } | Measure-Object).Count
-
-    $generatedAt = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-
-    # Build table rows
-    $rows = foreach ($row in $Data) {
-        # WhatIfReport: only connected + no error + cert readable counts as success
-        # Normal run: connected + no error + NTP OK + AdvancedSettings OK
-        $overallOk = if ($WhatIfReport) {
-            (-not $row.Error) -and ($row.Connected -eq $true) -and ($row.Thumbprint -ne "N/A")
-        } else {
-            (-not $row.Error) -and
-            ($row.Connected -eq $true) -and
-            ($row.NTP -eq "OK") -and
-            ($row.AdvancedSettings -eq "OK")
-        }
-
-        $rowClass = if ($row.Error) { "fail" } elseif ($overallOk) { "ok" } else { "warn" }
-
-        $thumbCell = if ($row.Thumbprint -eq "N/A") {
-            "<td class='na'>N/A</td>"
-        } else {
-            $encoded = [System.Web.HttpUtility]::HtmlEncode($row.Thumbprint)
-            "<td class='thumbprint'><span class='thumb-text'>$encoded</span><button class='copy-btn' onclick='copyThumb(this)' title='Copy to clipboard'>&#128203;</button></td>"
-        }
-
-        $expiryCell = if ($row.Expiry -eq "N/A") {
-            "<td class='na'>N/A</td>"
-        } else {
-            # Highlight expiry if within 90 days
-            try {
-                $expiryDate = [datetime]::ParseExact($row.Expiry, "yyyy-MM-dd HH:mm:ss", $null)
-                $daysLeft = ($expiryDate - (Get-Date)).Days
-                $expiryClass = if ($daysLeft -lt 30) { "expiry-critical" } elseif ($daysLeft -lt 90) { "expiry-warn" } else { "" }
-                "<td class='$expiryClass'>$([System.Web.HttpUtility]::HtmlEncode($row.Expiry))</td>"
-            } catch {
-                "<td>$([System.Web.HttpUtility]::HtmlEncode($row.Expiry))</td>"
-            }
-        }
-
-        $statusIcon = if ($row.Error) { "&#10008;" } elseif ($overallOk) { "&#10004;" } else { "&#9888;" }
-
-        "
-        <tr class='$rowClass'>
-            <td>$([System.Web.HttpUtility]::HtmlEncode($row.Host))</td>
-            $thumbCell
-            $expiryCell
-            <td>$(
-                if     ($row.CertRegen -eq 'OK' -and $WhatIfReport) { 'Not needed' }
-                elseif ($row.CertRegen -eq 'OK')                    { 'Regenerated' }
-                elseif ($row.CertRegen -eq 'Skipped')               { 'Not needed' }
-                elseif ($row.CertRegen -eq 'Manual')                { 'Manual required' }
-                elseif ($row.CertRegen -eq 'Regen needed')          { '<span class=expiry-warn>Regen needed</span>' }
-                else                                                 { [System.Web.HttpUtility]::HtmlEncode($row.CertRegen) }
-            )</td>
-            <td>$(
-                if     ($row.Rebooted -eq 'OK')      { 'Yes' }
-                elseif ($row.Rebooted -eq 'Skipped') { 'Not needed' }
-                elseif ($row.Rebooted -eq 'Manual')  { 'Manual required' }
-                elseif ($row.Rebooted -eq 'Timeout') { '<span class="expiry-critical">Timeout — check host console</span>' }
-                else                                 { [System.Web.HttpUtility]::HtmlEncode($row.Rebooted) }
-            )</td>
-            <td>$(if ($row.NTP -eq 'OK') { 'OK' } else { [System.Web.HttpUtility]::HtmlEncode($row.NTP) })</td>
-            <td>$(if ($row.AdvancedSettings -eq 'OK') { 'OK' } else { [System.Web.HttpUtility]::HtmlEncode($row.AdvancedSettings) })</td>
-            <td>$(if ($row.OptionalSettings -eq 'OK') { 'OK' } elseif ($row.OptionalSettings -eq 'Skipped') { '<span style=color:#6e7681>Skipped</span>' } elseif ($row.OptionalSettings -eq 'Partial') { '<span class=expiry-warn>Partial</span>' } else { [System.Web.HttpUtility]::HtmlEncode($row.OptionalSettings) })</td>
-            <td>$(if ($row.PasswordReset -eq 'OK') { 'Reset' } elseif ($row.PasswordReset -eq 'Skipped') { 'Not requested' } else { [System.Web.HttpUtility]::HtmlEncode($row.PasswordReset) })</td>
-            <td class='status'>$statusIcon $(if ($row.Error) { [System.Web.HttpUtility]::HtmlEncode($row.Error) } else { '' })</td>
-        </tr>"
-    }
-
-    $html = @"
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>HostPrep Report</title>
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: 'Segoe UI', Arial, sans-serif; background: #0d1117; color: #c9d1d9; padding: 32px; }
-  header { margin-bottom: 28px; border-bottom: 2px solid #1f6feb; padding-bottom: 16px; }
-  header h1 { font-size: 1.6rem; color: #58a6ff; letter-spacing: 0.5px; }
-  header p  { font-size: 0.85rem; color: #8b949e; margin-top: 4px; }
-  .meta { display: flex; gap: 32px; margin-bottom: 24px; flex-wrap: wrap; }
-  .meta-item { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px 20px; }
-  .meta-item .label { font-size: 0.75rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
-  .meta-item .value { font-size: 1.1rem; font-weight: 600; color: #c9d1d9; margin-top: 2px; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; background: #161b22; border-radius: 8px; overflow: hidden; border: 1px solid #30363d; }
-  thead th { background: #1f2937; color: #58a6ff; padding: 10px 14px; text-align: left; font-weight: 600; letter-spacing: 0.4px; white-space: nowrap; border-bottom: 2px solid #1f6feb; }
-  tbody tr { border-bottom: 1px solid #21262d; transition: background 0.15s; }
-  tbody tr:hover { background: #1c2128; }
-  tbody tr:last-child { border-bottom: none; }
-  td { padding: 10px 14px; vertical-align: top; }
-  td.thumbprint { font-family: 'Consolas', 'Courier New', monospace; font-size: 0.72rem; color: #79c0ff; word-break: break-all; max-width: 380px; }
-  .thumb-text { vertical-align: middle; }
-  .copy-btn { margin-left: 8px; background: #21262d; border: 1px solid #30363d; border-radius: 4px; color: #8b949e; cursor: pointer; font-size: 0.75rem; padding: 2px 6px; vertical-align: middle; transition: background 0.15s, color 0.15s; }
-  .copy-btn:hover { background: #1f6feb; color: #fff; border-color: #1f6feb; }
-  .copy-btn.copied { background: #238636; color: #fff; border-color: #238636; }
-  td.na { color: #6e7681; font-style: italic; }
-  td.status { white-space: nowrap; }
-  .expiry-warn     { color: #d29922; }
-  .expiry-critical { color: #f85149; font-weight: 600; }
-  tr.ok  td.status { color: #3fb950; }
-  tr.fail td.status { color: #f85149; }
-  tr.warn td.status { color: #d29922; }
-  tr.ok  td:first-child { border-left: 3px solid #3fb950; }
-  tr.fail td:first-child { border-left: 3px solid #f85149; }
-  tr.warn td:first-child { border-left: 3px solid #d29922; }
-  .note { margin-top: 20px; font-size: 0.8rem; color: #8b949e; background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px 16px; }
-  .note strong { color: #c9d1d9; }
-  footer { margin-top: 28px; font-size: 0.75rem; color: #6e7681; text-align: center; }
-</style>
-</head>
-<body>
-
-<header>
-  <h1>&#128196; HostPrep &mdash; VCF Commissioning Report</h1>
-  <p>Generated by HostPrep.ps1 v$($ScriptMeta.Version) &bull; $generatedAt</p>
-</header>
-
-<div class="meta">
-  <div class="meta-item">
-    <div class="label">Hosts processed</div>
-    <div class="value">$totalCount</div>
-  </div>
-  <div class="meta-item">
-    <div class="label">Successful</div>
-    <div class="value" style="color:#3fb950">$successCount</div>
-  </div>
-  <div class="meta-item">
-    <div class="label">Failed</div>
-    <div class="value" style="color:#f85149">$failCount</div>
-  </div>
-  <div class="meta-item">
-    <div class="label">Thumbprint format</div>
-    <div class="value">SHA256:base64</div>
-  </div>
-</div>
-
-<table>
-  <thead>
-    <tr>
-      <th>Host FQDN</th>
-      <th>SSL Thumbprint (SHA256:base64)</th>
-      <th>Cert Expiry</th>
-      <th>Cert Regen</th>
-      <th>Rebooted</th>
-      <th>NTP</th>
-      <th>Advanced Settings</th>
-      <th>Optional Settings</th>
-      <th>Password Reset</th>
-      <th>Status</th>
-    </tr>
-  </thead>
-  <tbody>
-    $($rows -join "`n")
-  </tbody>
-</table>
-
-<div class="note">
-  <strong>Note:</strong> The SSL thumbprint shown is in the <code>SHA256:&lt;base64&gt;</code> format
-  as expected by the SDDC Manager commissioning UI. Use these values to verify host identity
-  when adding hosts to SDDC Manager during VCF commissioning.
-  Thumbprints for hosts where certificate regeneration was performed reflect the <em>new</em> certificate.
-  Expiry dates within 90 days are shown in <span class="expiry-warn">amber</span>;
-  within 30 days in <span class="expiry-critical">red</span>.
-</div>
-
-<footer>HostPrep.ps1 &bull; $($ScriptMeta.Author) &bull; $($ScriptMeta.Blog)</footer>
-
-<script>
-function copyThumb(btn) {
-    var text = btn.previousElementSibling.textContent.trim();
-    navigator.clipboard.writeText(text).then(function() {
-        btn.textContent = 'Copied!';
-        btn.classList.add('copied');
-        setTimeout(function() {
-            btn.textContent = '\u{1F4CB}';
-            btn.classList.remove('copied');
-        }, 2000);
-    });
-}
-</script>
-
-</body>
-</html>
-"@
-
-    $html | Out-File -FilePath $ReportPath -Encoding UTF8
-    Write-Host ("  HTML report written to: {0}" -f $ReportPath) -ForegroundColor Cyan
-}
 
 
 Write-Host ""
