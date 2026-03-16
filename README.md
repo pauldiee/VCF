@@ -1,1 +1,1 @@
-Library of Scripts from HolleBolleVsan.nl
+Library of Scripts from https://www.hollebollevsan.nl
