@@ -731,6 +731,17 @@ function Reset-ESXiAccountPassword {
     }
 }
 
+function Get-CellColor ($value) {
+    if ($value -eq $true  -or $value -eq "OK")        { return "Green"    }
+    if ($value -eq $false -or $value -like "FAILED*")  { return "Red"      }
+    if ($value -eq "Skipped")                          { return "DarkGray" }
+    if ($value -eq "Manual")                           { return "Yellow"   }
+    if ($value -eq "Partial")                          { return "Yellow"   }
+    if ($value -eq "Timeout")                          { return "Red"      }
+    if ($value -like "Unexpected*")                    { return "Yellow"   }
+    return "White"
+}
+
 #endregion
 #region --- Credential Gathering ---
 
@@ -1134,18 +1145,6 @@ function Write-ColorSummaryTable {
     }
 
     $divider = "+" + (($columns.Values | ForEach-Object { "-" * ($_ + 2) }) -join "+") + "+"
-
-    # Helper: colour a cell value
-    function Get-CellColor ($value) {
-        if ($value -eq $true  -or $value -eq "OK")        { return "Green"    }
-        if ($value -eq $false -or $value -like "FAILED*")  { return "Red"      }
-        if ($value -eq "Skipped")                          { return "DarkGray" }
-        if ($value -eq "Manual")                           { return "Yellow"   }
-        if ($value -eq "Partial")                          { return "Yellow"   }
-        if ($value -eq "Timeout")                          { return "Red"      }
-        if ($value -like "Unexpected*")                    { return "Yellow"   }
-        return "White"
-    }
 
     Write-Host ""
     Write-Host $divider -ForegroundColor DarkCyan
